@@ -1,0 +1,146 @@
+CENTAUR RL - CHANGE LOG
+=======================
+What changed and why. Newest phase at the bottom. Paths are relative to the repo root.
+
+
+[2026-11-13] PHASE 1 - Port the unitree_rl_mjlab quadruped (Go2) velocity paradigm
+-------------------------------------------------------------------------------------
+Source: ~/Documents/Projects/repo/unitree_rl_mjlab (mjlab 1.2.0 + mujoco-warp 3.5.0 + rsl_rl PPO).
+
+1. Copied the shared velocity-task framework unchanged except imports (src. -> centaur_rl.):
+   centaur_rl/tasks/velocity/{velocity_env_cfg.py, mdp/, rl/}, scripts/{train,play,list_envs}.py.
+   WHY: same training paradigm (obs, rewards, DR, PPO settings) as Go2, so results are comparable.
+   Scripts add the repo root to sys.path, so `pip install -e .` is not needed.
+
+2. mjcf/build_train_xml.py -> mjcf/centaur_train.xml (generated training model).
+   - Upper body (torso, neck, 2x6-DoF arms) welded rigid: joints/actuators removed, mass,
+     inertia and visuals kept.
+     WHY: user asked for a static upper body the policy ignores. Keeping the mass means the
+     legs learn under the real ~58 kg load.
+   - Free-joint body `base_link` re-oriented to x-forward / z-up (CAD export was y-up, z-front).
+     WHY: mjlab velocity commands, projected gravity and heading use the root body frame.
+   - Added `imu` site + sensors imu_ang_vel / imu_lin_vel / imu_lin_acc / root_angmom.
+     WHY: names the shared velocity observations/rewards expect.
+   - No actuators in the XML; mjlab builds them from centaur_constants.py.
+
+3. centaur_rl/assets/robots/centaur/centaur_constants.py
+   - Position actuators kp=150, kd=5 on all 12 leg joints.
+     WHY: kp=80 sagged 0.2-0.3 rad under 58 kg. 150 matches the CAD export's actuators.
+   - Stance: thigh 0.45, calf -0.9 rad (knees back, Go2-like), init height 0.58 m.
+     WHY: fairly straight legs keep static knee torque around 20 Nm.
+
+4. centaur_rl/tasks/velocity/config/centaur/: tasks Centaur-Flat / Centaur-Rough.
+   Go2 env config with Centaur names; trot gait offsets [FR,FL,RR,RL] = [0, .5, .5, 0].
+   PPO config identical to Go2 (experiment_name centaur_velocity).
+
+Verified: Centaur-Flat 1024 envs x 150 iters -> mean episode length ~870/1000, reward rising.
+          Centaur-Rough 1024 envs runs on the 6 GB GPU.
+
+
+[2026-11-13] PHASE 1b - User fixes
+-----------------------------------
+1. Leg L/R naming was mirrored (the "FR" leg was physically front-LEFT).
+   - Swapped FR<->FL and RR<->RL in mjcf/centaur.xml and mjcf/controls.xml, and swapped
+     the STL files (FR_i.STL <-> FL_i.STL, RR_i.STL <-> RL_i.STL) so file names still match.
+     Kinematic structure verified identical apart from names. FR is now at -y (right).
+   - controls.xml's single `contact` sensor still tracks the same physical calf, which is
+     now named FL_3.
+   - Pitch-sign groups in the stance flipped accordingly (FL/RL +, FR/RR -).
+   - NOT changed: mjcf/urdf2mjcf_config.json (converter config keyed by the URDF's link
+     names). Re-running the URDF->MJCF converter would bring back the old names.
+2. Effort limit 40 -> 100 Nm (EFFORT_LIMIT in centaur_constants.py). WHY: user request.
+   40 Nm was the converter's default placeholder.
+3. Upper body stays in the model (mass + visuals) as a static payload. More in phase 2.
+4. Collision: ONLY the four calf meshes collide (`<leg>_calf_collision`, convex hull of the
+   calf mesh). Base, hips, thighs, upper body: visual only. Foot sphere/capsule removed.
+   WHY: user request.
+   Consequences handled:
+   - Calf meshes are the "feet" for the foot contact sensor, gait/air-time/slip rewards and
+     friction randomization (FOOT_GEOM_NAMES).
+   - Foot sites `<leg>` sit 2 cm above the calf tip, for foot-height/clearance terms.
+   - Go2's "illegal_contact" (non-foot body touching ground) termination is gone: no
+     non-foot geom can touch anything now. Replaced by `base_too_low`
+     (mdp/terminations.py): terminate if base z - mean foot-site z < 0.30 m
+     (nominal ~0.54 m). Terrain-agnostic, unlike an absolute height check.
+     The 70 deg tilt termination (fell_over) is kept.
+Verified: Flat 150 iters -> episode length ~870/1000, reward ~19, no fell_over.
+
+
+[2026-11-13] PHASE 1c - Paper: SGS, Success-Guided Sampling (2610.12465v1.pdf)
+-------------------------------------------------------------------------------
+Paper method (Sec 3.2, App A.1/B.2): fix N task configurations. Keep the last H=100
+boolean outcomes for each; p_i = their mean. Weight with a Beta kernel
+w_i = (p_i+eps)^(k t) (1-p_i+eps)^(k(1-t)), floor at eps, logit = log(w_i+eps), and sample
+the next config at each reset from softmax(logit / max(T,1)).
+Locomotion values: t=0.66, kappa=5, T=2, eps=1e-8, H=100. This focuses training on
+configurations the policy solves sometimes, replacing hand-written curricula.
+
+Implementation: centaur_rl/tasks/velocity/mdp/sgs.py
+- SuccessGuidedSampling (curriculum term). mjlab runs curriculum terms first in a reset,
+  before events and command resampling. For each resetting env it:
+  (1) records the finished episode's outcome in that config's ring buffer,
+  (2) samples the next config from the SGS distribution,
+  (3) moves the env to the config's terrain tile (row = difficulty level, col = type).
+- reset_root_state_sgs (reset event): spawns at the config's (dx, dy, yaw) pose.
+- SgsVelocityCommand: velocity command fixed for the whole episode to the config's command.
+  It also accumulates the episode-mean tracking errors used for the success test.
+- New tasks Centaur-Flat-SGS / Centaur-Rough-SGS (config/centaur/env_cfgs.py: apply_sgs).
+  The original Centaur-Flat / Centaur-Rough stay as the uniform-sampling + curriculum
+  baseline (the paper's comparison).
+
+Adaptation decisions (the paper does goal reaching; this task is velocity tracking):
+- Config = (terrain tile, spawn pose, velocity command), like the paper's
+  (terrain type, level, start state, goal). The command plays the role of the goal, so it
+  is held fixed for the episode. No mid-episode resampling, heading control or random
+  standing envs in SGS tasks; 5% of the fixed commands are zero (standing).
+- Success = reached time-out without a failure termination AND episode-mean
+  |v_xy error| < 0.3 m/s AND |yaw-rate error| < 0.3 rad/s (SGS_PARAMS in env_cfgs.py).
+  Failure terminations count as failures. Time-outs of episodes shorter than 50% of max
+  length (rsl_rl randomizes initial episode length) are not recorded.
+- SGS replaces BOTH curricula (terrain_levels, command_vel). WHY: that is the paper's point:
+  success-based sampling instead of hand-designed difficulty schedules.
+- Config-set size: paper N=104k at 4K-1M envs. Here 1024 envs x 20 s episodes is only
+  ~250k episodes per full run, so 104k configs would each be seen ~2 times and H=100
+  estimates would never form. Chosen: Rough 10x20 tiles x 4 spawns x 16 commands = 12,800;
+  Flat 4 spawns x 1024 commands = 4,096. Scale up with more envs.
+- NOT adopted: the paper's shared sparse reward (terminal success +50 / failure -50 plus
+  small regularizers). WHY: phase 1 asked for the Go2 reward paradigm. The sampler is the
+  paper's contribution and works with any reward. Switching the reward is a separate
+  experiment.
+- Play mode for the -SGS tasks uses the normal play config (free joystick commands).
+New logs: Curriculum/sgs/{episode_success, configs_seen_frac, configs_frontier_frac,
+mean_success_seen, sampled_terrain_level, sampled_cmd_speed, probs_max_over_uniform}.
+
+Verified (1 seed, 1024 envs, 150 iters, flat):
+  Centaur-Flat (baseline)  : reward 19.3, ep len 869, track_lin_vel 0.27
+  Centaur-Flat-SGS         : reward 31.2, ep len 910, track_lin_vel 0.60,
+                             frontier configs 1.9%, 95% of configs visited
+  Caveat: SGS picks commands the policy can partly track, so per-term rewards are not
+  apples-to-apples. Compare with a fixed evaluation command set over full-length runs
+  before drawing conclusions.
+  Centaur-Rough-SGS: smoke tests run on the 6 GB GPU (102,400- and 12,800-config versions).
+
+
+[2026-11-13] PHASE 1d - Upper body removed from the training model (quadruped only)
+-----------------------------------------------------------------------------------
+1. mjcf/build_train_xml.py: new switch UPPER_BODY_MODE = "remove" (default) | "weld".
+   - "remove": deletes the whole Torso_1 subtree (torso, neck, both arms) from base_link.
+     It also drops the mesh assets no longer used (Torso_*, Neck_*, r_h*, l_h*), so the
+     training model only loads the 13 base/leg meshes.
+   - "weld": the previous behaviour (static payload frozen at UPPER_BODY_POSE), kept for
+     phase 2.
+   WHY: user request. Train the plain quadruped first; the upper body comes back later.
+   mjcf/centaur.xml (the full model) is untouched.
+2. Regenerated mjcf/centaur_train.xml: 13 bodies (base + 12 leg links), 12 leg joints,
+   mass 57.98 -> 35.53 kg, CoM now centred over the legs (x = +0.01 m; was +0.076 m
+   toward the torso end). Collision is still calf meshes only.
+3. Nothing else changed. Actuators (kp 150 / kd 5, 100 Nm), stance (0.45 / -0.9 rad),
+   init height, rewards and the SGS/baseline tasks are all as before. The stance only
+   depends on the legs, so the 0.58 m spawn height is still right. Gains tuned for 58 kg
+   are now generous for 35.5 kg; revisit if the gait looks stiff.
+   Docstrings/README updated to say the model is quadruped-only.
+
+Verified (Centaur-Flat, 1024 envs, 150 iters, 1 seed):
+  iter 100: episode length 1000/1000, reward 33.0
+  iter 149: reward 41.9, ep len 995, track_lin_vel 0.60, no fell_over
+  (welded-upper-body version at iter 149: reward 19.3, ep len 869, track_lin_vel 0.27)

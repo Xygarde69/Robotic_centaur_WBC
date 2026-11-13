@@ -1,0 +1,37 @@
+<mujoco model="controls">
+  <actuator>
+    <position name="Torso_1_act" joint="Torso_1" forcerange="-40 40" ctrlrange="-1.57079633 1.57079633" kp="150" dampratio="1" armature="0.0005" />
+    <position name="Torso_2_act" joint="Torso_2" forcerange="-40 40" ctrlrange="-1.57079633 1.57079633" kp="150" dampratio="1" armature="0.0005" />
+    <position name="Neck_2_act" joint="Neck_2" forcerange="-40 40" ctrlrange="-1.57079633 1.57079633" kp="150" dampratio="1" armature="0.0005" />
+    <position name="Neck_1_act" joint="Neck_1" forcerange="-40 40" ctrlrange="-1.57079633 1.57079633" kp="150" dampratio="1" armature="0.0005" />
+    <position name="r_h1_act" joint="r_h1" forcerange="-40 40" ctrlrange="-3.14159265 3.14159265" kp="150" dampratio="1" armature="0.0005" />
+    <position name="r_h2_act" joint="r_h2" forcerange="-40 40" ctrlrange="-3.14159265 3.14159265" kp="150" dampratio="1" armature="0.0005" />
+    <position name="r_h3_act" joint="r_h3" forcerange="-40 40" ctrlrange="-3.14159265 3.14159265" kp="150" dampratio="1" armature="0.0005" />
+    <position name="r_h4_act" joint="r_h4" forcerange="-40 40" ctrlrange="-3.14159265 3.14159265" kp="150" dampratio="1" armature="0.0005" />
+    <position name="r_h5_act" joint="r_h5" forcerange="-40 40" ctrlrange="-3.14159265 3.14159265" kp="150" dampratio="1" armature="0.0005" />
+    <position name="r_h6_act" joint="r_h6" forcerange="-40 40" ctrlrange="-3.14159265 3.14159265" kp="150" dampratio="1" armature="0.0005" />
+    <position name="l_h1_act" joint="l_h1" forcerange="-40 40" ctrlrange="-3.14159265 3.14159265" kp="150" dampratio="1" armature="0.0005" />
+    <position name="l_h2_act" joint="l_h2" forcerange="-40 40" ctrlrange="-3.14159265 3.14159265" kp="150" dampratio="1" armature="0.0005" />
+    <position name="l_h3_act" joint="l_h3" forcerange="-40 40" ctrlrange="-3.14159265 3.14159265" kp="150" dampratio="1" armature="0.0005" />
+    <position name="l_h4_act" joint="l_h4" forcerange="-40 40" ctrlrange="-3.14159265 3.14159265" kp="150" dampratio="1" armature="0.0005" />
+    <position name="l_h5_act" joint="l_h5" forcerange="-40 40" ctrlrange="-3.14159265 3.14159265" kp="150" dampratio="1" armature="0.0005" />
+    <position name="l_h6_act" joint="l_h6" forcerange="-40 40" ctrlrange="-3.14159265 3.14159265" kp="150" dampratio="1" armature="0.0005" />
+    <position name="FL_1_act" joint="FL_1" forcerange="-40 40" ctrlrange="-1.57079633 1.57079633" kp="150" dampratio="1" armature="0.0005" />
+    <position name="FL_2_act" joint="FL_2" forcerange="-40 40" ctrlrange="-1.57079633 1.57079633" kp="150" dampratio="1" armature="0.0005" />
+    <position name="FL_3_act" joint="FL_3" forcerange="-40 40" ctrlrange="-1.57079633 1.57079633" kp="150" dampratio="1" armature="0.0005" />
+    <position name="FR_1_act" joint="FR_1" forcerange="-40 40" ctrlrange="-1.57079633 1.57079633" kp="150" dampratio="1" armature="0.0005" />
+    <position name="FR_2_act" joint="FR_2" forcerange="-40 40" ctrlrange="-1.57079633 1.57079633" kp="150" dampratio="1" armature="0.0005" />
+    <position name="FR_3_act" joint="FR_3" forcerange="-40 40" ctrlrange="-1.57079633 1.57079633" kp="150" dampratio="1" armature="0.0005" />
+    <position name="RL_1_act" joint="RL_1" forcerange="-40 40" ctrlrange="-1.57079633 1.57079633" kp="150" dampratio="1" armature="0.0005" />
+    <position name="RL_2_act" joint="RL_2" forcerange="-40 40" ctrlrange="-1.57079633 1.57079633" kp="150" dampratio="1" armature="0.0005" />
+    <position name="RL_3_act" joint="RL_3" forcerange="-40 40" ctrlrange="-1.57079633 1.57079633" kp="150" dampratio="1" armature="0.0005" />
+    <position name="RR_1_act" joint="RR_1" forcerange="-40 40" ctrlrange="-1.57079633 1.57079633" kp="150" dampratio="1" armature="0.0005" />
+    <position name="RR_2_act" joint="RR_2" forcerange="-40 40" ctrlrange="-1.57079633 1.57079633" kp="150" dampratio="1" armature="0.0005" />
+    <position name="RR_3_act" joint="RR_3" forcerange="-40 40" ctrlrange="-1.57079633 1.57079633" kp="150" dampratio="1" armature="0.0005" />
+  </actuator>
+  <sensor>
+    <gyro name="gyro" site="gyro_site" />
+    <accelerometer name="accelerometer" noise="0.02" interval="0.005 0" nsample="10" site="gyro_site" />
+    <contact name="contact" body1="FL_3" geom2="floor" data="found force" num="1" reduce="netforce" />
+  </sensor>
+</mujoco>

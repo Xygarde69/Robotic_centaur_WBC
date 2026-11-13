@@ -1,0 +1,28 @@
+<mujoco model="upper_body">
+  <!-- Included inside base_link -->
+  <body name="Torso_1" pos="0 0.156 0.2">
+    <joint type="hinge" axis="0 -1 0" limited="true" range="-1.57079633 1.57079633" actuatorfrcrange="-40 40" name="Torso_1" />
+    <inertial pos="-3.29340555e-10 0.0460076593 -6.94797553e-11" mass="0.647635006" fullinertia="0.00118766415 0.000811221432 0.000863800055 -2.97018411e-19 7.95345298e-20 -9.92056125e-20" />
+    <geom class="visual" type="mesh" mesh="Torso_1" rgba="0.894117647 0.894117647 0.894117647 1" />
+    <geom class="collision" type="mesh" mesh="Torso_1" />
+    <body name="Torso_2" pos="0 0.055615 0">
+      <joint type="hinge" axis="-1 0 0" limited="true" range="-1.57079633 1.57079633" actuatorfrcrange="-40 40" name="Torso_2" />
+      <inertial pos="-3.29340555e-10 0.0840151034 -6.94797553e-11" mass="2.69797816" fullinertia="0.0191136763 0.00506067654 0.0204206779 7.0189415e-19 -2.49082602e-20 1.374438e-19" />
+      <geom class="visual" type="mesh" mesh="Torso_2" rgba="0.894117647 0.894117647 0.894117647 1" />
+      <geom class="collision" type="mesh" mesh="Torso_2" />
+      <body name="Neck_2" pos="0 0.2202 0" quat="0.707105483 0 0 0.70710808">
+        <joint type="hinge" axis="1 0 0" limited="true" range="-1.57079633 1.57079633" actuatorfrcrange="-40 40" name="Neck_2" />
+        <inertial pos="0.0285116939 3.29340888e-10 -6.94793112e-11" mass="0.260513267" fullinertia="0.000364795297 0.000268919216 0.000393065376 -1.0226902e-19 3.53769017e-20 7.39896051e-11" />
+        <geom class="visual" type="mesh" mesh="Neck_2" rgba="0.894117647 0.894117647 0.894117647 1" />
+        <geom class="collision" type="mesh" mesh="Neck_2" />
+        <body name="Neck_1" pos="0.06 0 0" quat="0.707105483 0 0 -0.70710808">
+          <joint type="hinge" axis="-1 0 0" limited="true" range="-1.57079633 1.57079633" actuatorfrcrange="-40 40" name="Neck_1" />
+          <inertial pos="-3.84964283e-11 0.0630279681 -0.00048800429" mass="0.481682822" fullinertia="0.00164353544 0.000362314989 0.00182521994 -1.17640484e-11 -1.08281753e-10 1.97387386e-05" />
+          <geom class="visual" type="mesh" mesh="Neck_1" rgba="0.894117647 0.894117647 0.894117647 1" />
+          <geom class="collision" type="mesh" mesh="Neck_1" />
+        </body>
+      </body>
+      <include file="arms_6dof.xml" />
+    </body>
+  </body>
+</mujoco>

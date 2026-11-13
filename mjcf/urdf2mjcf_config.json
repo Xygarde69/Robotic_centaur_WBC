@@ -1,0 +1,478 @@
+{
+  "global": {
+    "modelName": "lmao_with_neck",
+    "meshScale": 1.0,
+    "rootFree": true,
+    "rootHeight": 0.7,
+    "fusestatic": false,
+    "floor": true,
+    "floorSize": 5.0,
+    "floorFriction": [
+      1,
+      0.005,
+      0.0001
+    ],
+    "prettyScene": true,
+    "selfCollision": true,
+    "showCollision": false,
+    "option": {
+      "timestep": 0.002,
+      "gravity": [
+        0,
+        0,
+        -9.81
+      ],
+      "integrator": "implicitfast"
+    },
+    "flags": {},
+    "compiler": {
+      "balanceinertia": true
+    },
+    "defaultMassMode": "urdf",
+    "defaultMassScale": 1.0,
+    "defaultMaterial": "Aluminium 6061",
+    "defaultDensity": 2700,
+    "defaultMeshInertia": "convex",
+    "defaultCollision": "visual",
+    "defaultFitscale": 1.0,
+    "geomDefaults": {
+      "friction": [
+        1,
+        0.005,
+        0.0001
+      ]
+    },
+    "jointDefaults": {
+      "armature": 0.01,
+      "damping": 0.1,
+      "torqueLimit": 40
+    },
+    "actuatorDefaults": {
+      "type": "position",
+      "kp": 150,
+      "dampratio": 1,
+      "torqueLimit": 40,
+      "armature": 0.0005,
+      "gear": 1
+    }
+  },
+  "links": {
+    "root": {
+      "massMode": "inherit",
+      "geom": {}
+    },
+    "base_link": {
+      "massMode": "inherit",
+      "geom": {}
+    },
+    "Torso_1": {
+      "massMode": "inherit",
+      "geom": {}
+    },
+    "Torso_2": {
+      "massMode": "inherit",
+      "geom": {}
+    },
+    "Neck_2": {
+      "massMode": "inherit",
+      "geom": {}
+    },
+    "Neck_1": {
+      "massMode": "inherit",
+      "geom": {}
+    },
+    "r_h1": {
+      "massMode": "inherit",
+      "geom": {}
+    },
+    "r_h2": {
+      "massMode": "inherit",
+      "geom": {}
+    },
+    "r_h3": {
+      "massMode": "inherit",
+      "geom": {}
+    },
+    "r_h4": {
+      "massMode": "inherit",
+      "geom": {}
+    },
+    "r_h5": {
+      "massMode": "inherit",
+      "geom": {}
+    },
+    "r_h6": {
+      "massMode": "inherit",
+      "geom": {}
+    },
+    "l_h1": {
+      "massMode": "inherit",
+      "geom": {}
+    },
+    "l_h2": {
+      "massMode": "inherit",
+      "geom": {}
+    },
+    "l_h3": {
+      "massMode": "inherit",
+      "geom": {}
+    },
+    "l_h4": {
+      "massMode": "inherit",
+      "geom": {}
+    },
+    "l_h5": {
+      "massMode": "inherit",
+      "geom": {}
+    },
+    "l_h6": {
+      "massMode": "inherit",
+      "geom": {}
+    },
+    "FR_1": {
+      "massMode": "inherit",
+      "geom": {}
+    },
+    "FR_2": {
+      "massMode": "inherit",
+      "geom": {}
+    },
+    "FR_3": {
+      "massMode": "inherit",
+      "geom": {}
+    },
+    "FL_1": {
+      "massMode": "inherit",
+      "geom": {}
+    },
+    "FL_2": {
+      "massMode": "inherit",
+      "geom": {}
+    },
+    "FL_3": {
+      "massMode": "inherit",
+      "geom": {}
+    },
+    "RR_1": {
+      "massMode": "inherit",
+      "geom": {}
+    },
+    "RR_2": {
+      "massMode": "inherit",
+      "geom": {}
+    },
+    "RR_3": {
+      "massMode": "inherit",
+      "geom": {}
+    },
+    "RL_1": {
+      "massMode": "inherit",
+      "geom": {}
+    },
+    "RL_2": {
+      "massMode": "inherit",
+      "geom": {}
+    },
+    "RL_3": {
+      "massMode": "inherit",
+      "geom": {}
+    }
+  },
+  "joints": {
+    "root_to_base_link": {
+      "limited": null,
+      "lower": null,
+      "upper": null,
+      "dyn": {},
+      "actuator": {
+        "type": "inherit"
+      }
+    },
+    "Torso_1": {
+      "limited": null,
+      "lower": null,
+      "upper": null,
+      "dyn": {},
+      "actuator": {
+        "type": "inherit"
+      }
+    },
+    "Torso_2": {
+      "limited": null,
+      "lower": null,
+      "upper": null,
+      "dyn": {},
+      "actuator": {
+        "type": "inherit"
+      }
+    },
+    "Neck_2": {
+      "limited": null,
+      "lower": null,
+      "upper": null,
+      "dyn": {},
+      "actuator": {
+        "type": "inherit"
+      }
+    },
+    "Neck_1": {
+      "limited": null,
+      "lower": null,
+      "upper": null,
+      "dyn": {},
+      "actuator": {
+        "type": "inherit"
+      }
+    },
+    "r_h1": {
+      "limited": null,
+      "lower": null,
+      "upper": null,
+      "dyn": {},
+      "actuator": {
+        "type": "inherit"
+      }
+    },
+    "r_h2": {
+      "limited": null,
+      "lower": null,
+      "upper": null,
+      "dyn": {},
+      "actuator": {
+        "type": "inherit"
+      }
+    },
+    "r_h3": {
+      "limited": null,
+      "lower": null,
+      "upper": null,
+      "dyn": {},
+      "actuator": {
+        "type": "inherit"
+      }
+    },
+    "r_h4": {
+      "limited": null,
+      "lower": null,
+      "upper": null,
+      "dyn": {},
+      "actuator": {
+        "type": "inherit"
+      }
+    },
+    "r_h5": {
+      "limited": null,
+      "lower": null,
+      "upper": null,
+      "dyn": {},
+      "actuator": {
+        "type": "inherit"
+      }
+    },
+    "r_h6": {
+      "limited": null,
+      "lower": null,
+      "upper": null,
+      "dyn": {},
+      "actuator": {
+        "type": "inherit"
+      }
+    },
+    "l_h1": {
+      "limited": null,
+      "lower": null,
+      "upper": null,
+      "dyn": {},
+      "actuator": {
+        "type": "inherit"
+      }
+    },
+    "l_h2": {
+      "limited": null,
+      "lower": null,
+      "upper": null,
+      "dyn": {},
+      "actuator": {
+        "type": "inherit"
+      }
+    },
+    "l_h3": {
+      "limited": null,
+      "lower": null,
+      "upper": null,
+      "dyn": {},
+      "actuator": {
+        "type": "inherit"
+      }
+    },
+    "l_h4": {
+      "limited": null,
+      "lower": null,
+      "upper": null,
+      "dyn": {},
+      "actuator": {
+        "type": "inherit"
+      }
+    },
+    "l_h5": {
+      "limited": null,
+      "lower": null,
+      "upper": null,
+      "dyn": {},
+      "actuator": {
+        "type": "inherit"
+      }
+    },
+    "l_h6": {
+      "limited": null,
+      "lower": null,
+      "upper": null,
+      "dyn": {},
+      "actuator": {
+        "type": "inherit"
+      }
+    },
+    "FR_1": {
+      "limited": null,
+      "lower": null,
+      "upper": null,
+      "dyn": {},
+      "actuator": {
+        "type": "inherit"
+      }
+    },
+    "FR_2": {
+      "limited": null,
+      "lower": null,
+      "upper": null,
+      "dyn": {},
+      "actuator": {
+        "type": "inherit"
+      }
+    },
+    "FR_3": {
+      "limited": null,
+      "lower": null,
+      "upper": null,
+      "dyn": {},
+      "actuator": {
+        "type": "inherit"
+      }
+    },
+    "FL_1": {
+      "limited": null,
+      "lower": null,
+      "upper": null,
+      "dyn": {},
+      "actuator": {
+        "type": "inherit"
+      }
+    },
+    "FL_2": {
+      "limited": null,
+      "lower": null,
+      "upper": null,
+      "dyn": {},
+      "actuator": {
+        "type": "inherit"
+      }
+    },
+    "FL_3": {
+      "limited": null,
+      "lower": null,
+      "upper": null,
+      "dyn": {},
+      "actuator": {
+        "type": "inherit"
+      }
+    },
+    "RR_1": {
+      "limited": null,
+      "lower": null,
+      "upper": null,
+      "dyn": {},
+      "actuator": {
+        "type": "inherit"
+      }
+    },
+    "RR_2": {
+      "limited": null,
+      "lower": null,
+      "upper": null,
+      "dyn": {},
+      "actuator": {
+        "type": "inherit"
+      }
+    },
+    "RR_3": {
+      "limited": null,
+      "lower": null,
+      "upper": null,
+      "dyn": {},
+      "actuator": {
+        "type": "inherit"
+      }
+    },
+    "RL_1": {
+      "limited": null,
+      "lower": null,
+      "upper": null,
+      "dyn": {},
+      "actuator": {
+        "type": "inherit"
+      }
+    },
+    "RL_2": {
+      "limited": null,
+      "lower": null,
+      "upper": null,
+      "dyn": {},
+      "actuator": {
+        "type": "inherit"
+      }
+    },
+    "RL_3": {
+      "limited": null,
+      "lower": null,
+      "upper": null,
+      "dyn": {},
+      "actuator": {
+        "type": "inherit"
+      }
+    }
+  },
+  "sensors": [
+    {
+      "type": "gyro",
+      "body": "base_link"
+    },
+    {
+      "type": "accelerometer",
+      "body": "base_link",
+      "noise": 0.02,
+      "interval": [
+        0.005
+      ]
+    },
+    {
+      "type": "contact",
+      "body": "FR_3",
+      "other": "floor",
+      "data": [
+        "found",
+        "force"
+      ],
+      "num": 1,
+      "reduce": "netforce"
+    }
+  ],
+  "cameras": [],
+  "excludes": [],
+  "keyframes": [
+    {
+      "name": "home",
+      "qpos": {},
+      "ctrlFromPose": true
+    }
+  ]
+}

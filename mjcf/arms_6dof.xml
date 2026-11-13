@@ -1,0 +1,75 @@
+<mujoco model="arms_6dof">
+  <!-- Included inside Torso_2 -->
+  <body name="r_h1" pos="-0.059514 0.1642 0">
+    <joint type="hinge" axis="1 0 0" limited="true" range="-3.14159265 3.14159265" actuatorfrcrange="-40 40" name="r_h1" />
+    <inertial pos="-0.10877004 -0.000191519942 -6.94855284e-11" mass="1.94791733" fullinertia="0.00280530403 0.0028030687 0.00225307845 8.74017114e-20 1.82529488e-18 2.2107716e-18" />
+    <geom class="visual" type="mesh" mesh="r_h1" rgba="0.894117647 0.894117647 0.894117647 1" />
+    <geom class="collision" type="mesh" mesh="r_h1" />
+    <body name="r_h2" pos="-0.186 0.035 0">
+      <joint type="hinge" axis="0 1 0" limited="true" range="-3.14159265 3.14159265" actuatorfrcrange="-40 40" name="r_h2" />
+      <inertial pos="-0.126031913 -0.0900000005 -6.94861946e-11" mass="1.50151501" fullinertia="0.00167962098 0.0159224734 0.0146432564 3.57836555e-18 -4.61146363e-17 4.16401784e-18" />
+      <geom class="visual" type="mesh" mesh="r_h2" rgba="0.894117647 0.894117647 0.894117647 1" />
+      <geom class="collision" type="mesh" mesh="r_h2" />
+      <body name="r_h3" pos="-0.25 -0.11 0">
+        <joint type="hinge" axis="0 1 0" limited="true" range="-3.14159265 3.14159265" actuatorfrcrange="-40 40" name="r_h3" />
+        <inertial pos="-0.110661 -0.0755182423 -6.94875268e-11" mass="2.62324764" fullinertia="0.00338872958 0.0107188351 0.00953077201 -1.23945357e-18 -2.03722705e-17 4.71995499e-18" />
+        <geom class="visual" type="mesh" mesh="r_h3" rgba="0.894117647 0.894117647 0.894117647 1" />
+        <geom class="collision" type="mesh" mesh="r_h3" />
+        <body name="r_h4" pos="-0.215 -0.09 0">
+          <joint type="hinge" axis="1 0 0" limited="true" range="-3.14159265 3.14159265" actuatorfrcrange="-40 40" name="r_h4" />
+          <inertial pos="-0.149629238 0.000298350379 -6.94886371e-11" mass="1.25042093" fullinertia="0.00172355201 0.00196265864 0.00141266838 -3.57256966e-19 8.61075266e-19 2.25882558e-18" />
+          <geom class="visual" type="mesh" mesh="r_h4" rgba="0.894117647 0.894117647 0.894117647 1" />
+          <geom class="collision" type="mesh" mesh="r_h4" />
+          <body name="r_h5" pos="-0.186 -0.035 0">
+            <joint type="hinge" axis="0 -1 0" limited="true" range="-3.14159265 3.14159265" actuatorfrcrange="-40 40" name="r_h5" />
+            <inertial pos="-0.0937774965 0.0899999995 -6.9488193e-11" mass="1.47775124" fullinertia="0.00202027685 0.00348960646 0.00295146129 -3.2319789e-19 -3.08819313e-18 2.34304078e-18" />
+            <geom class="visual" type="mesh" mesh="r_h5" rgba="0.894117647 0.894117647 0.894117647 1" />
+            <geom class="collision" type="mesh" mesh="r_h5" />
+            <body name="r_h6" pos="-0.115 0.09 0">
+              <joint type="hinge" axis="1 0 0" limited="true" range="-3.14159265 3.14159265" actuatorfrcrange="-40 40" name="r_h6" />
+              <inertial pos="-0.100856118 -4.55016025e-10 -6.94890812e-11" mass="0.380916791" fullinertia="0.000539972502 0.000655618717 0.000529205117 5.61745824e-19 -3.91774711e-19 6.07228886e-19" />
+              <geom class="visual" type="mesh" mesh="r_h6" rgba="0.894117647 0.894117647 0.894117647 1" />
+              <geom class="collision" type="mesh" mesh="r_h6" />
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </body>
+  <body name="l_h1" pos="0.059486 0.1642 0">
+    <joint type="hinge" axis="-1 0 0" limited="true" range="-3.14159265 3.14159265" actuatorfrcrange="-40 40" name="l_h1" />
+    <inertial pos="0.108798495 -0.000191519942 -6.94933e-11" mass="1.94791733" fullinertia="0.00280530403 0.0028030687 0.00225307845 7.48621051e-21 5.71395115e-18 2.24146938e-18" />
+    <geom class="visual" type="mesh" mesh="l_h1" rgba="0.894117647 0.894117647 0.894117647 1" />
+    <geom class="collision" type="mesh" mesh="l_h1" />
+    <body name="l_h2" pos="0.186 0.035 0">
+      <joint type="hinge" axis="0 1 0" limited="true" range="-3.14159265 3.14159265" actuatorfrcrange="-40 40" name="l_h2" />
+      <inertial pos="0.126060369 -0.0900000005 -6.94913016e-11" mass="1.50151501" fullinertia="0.00167962098 0.0159224734 0.0146432564 2.53704799e-20 -1.28868464e-16 4.85004861e-18" />
+      <geom class="visual" type="mesh" mesh="l_h2" rgba="0.894117647 0.894117647 0.894117647 1" />
+      <geom class="collision" type="mesh" mesh="l_h2" />
+      <body name="l_h3" pos="0.25 -0.11 0">
+        <joint type="hinge" axis="0 1 0" limited="true" range="-3.14159265 3.14159265" actuatorfrcrange="-40 40" name="l_h3" />
+        <inertial pos="0.110689455 -0.0755182423 -6.94886371e-11" mass="2.62324764" fullinertia="0.00338872958 0.0107188351 0.00953077201 -1.15699496e-18 -6.13515642e-17 5.03309374e-18" />
+        <geom class="visual" type="mesh" mesh="l_h3" rgba="0.894117647 0.894117647 0.894117647 1" />
+        <geom class="collision" type="mesh" mesh="l_h3" />
+        <body name="l_h4" pos="0.215 -0.09 0">
+          <joint type="hinge" axis="-1 0 0" limited="true" range="-3.14159265 3.14159265" actuatorfrcrange="-40 40" name="l_h4" />
+          <inertial pos="0.149657693 0.000298350379 -6.94866387e-11" mass="1.25042093" fullinertia="0.00172355201 0.00196265864 0.00141266838 5.197455e-20 2.61735392e-18 2.07631047e-18" />
+          <geom class="visual" type="mesh" mesh="l_h4" rgba="0.894117647 0.894117647 0.894117647 1" />
+          <geom class="collision" type="mesh" mesh="l_h4" />
+          <body name="l_h5" pos="0.186 -0.035 0">
+            <joint type="hinge" axis="0 -1 0" limited="true" range="-3.14159265 3.14159265" actuatorfrcrange="-40 40" name="l_h5" />
+            <inertial pos="0.0938059518 0.0899999995 -6.94848623e-11" mass="1.47775124" fullinertia="0.00202027685 0.00348960646 0.00295146129 9.25156215e-19 -9.30272016e-18 1.82955917e-18" />
+            <geom class="visual" type="mesh" mesh="l_h5" rgba="0.894117647 0.894117647 0.894117647 1" />
+            <geom class="collision" type="mesh" mesh="l_h5" />
+            <body name="l_h6" pos="0.115 0.09 0">
+              <joint type="hinge" axis="-1 0 0" limited="true" range="-3.14159265 3.14159265" actuatorfrcrange="-40 40" name="l_h6" />
+              <inertial pos="0.100884573 -4.54996929e-10 -6.948353e-11" mass="0.380916791" fullinertia="0.000539972502 0.000655618717 0.000529205117 3.46291313e-19 -6.01449355e-19 5.95164476e-19" />
+              <geom class="visual" type="mesh" mesh="l_h6" rgba="0.894117647 0.894117647 0.894117647 1" />
+              <geom class="collision" type="mesh" mesh="l_h6" />
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </body>
+</mujoco>
