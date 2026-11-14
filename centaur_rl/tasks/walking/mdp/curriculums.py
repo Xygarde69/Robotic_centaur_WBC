@@ -43,10 +43,16 @@ def terrain_levels_vel(
   command = env.command_manager.get_command(command_name)
   assert command is not None
 
-  # Compute the distance the robot walked.
-  distance = torch.norm(
-    asset.data.root_link_pos_w[env_ids, :2] - env.scene.env_origins[env_ids, :2], dim=1
-  )
+  # Compute the distance the robot walked. The walk command tracks it along the body
+  # heading (arc length), since on a circular-arc command the straight-line displacement
+  # from the start never exceeds the circle's diameter.
+  term = env.command_manager.get_term(command_name)
+  if hasattr(term, "forward_distance"):
+    distance = term.forward_distance[env_ids]
+  else:
+    distance = torch.norm(
+      asset.data.root_link_pos_w[env_ids, :2] - env.scene.env_origins[env_ids, :2], dim=1
+    )
 
   # Robots that walked far enough progress to harder terrains.
   move_up = distance > terrain_generator.size[0] / 2

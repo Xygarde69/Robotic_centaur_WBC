@@ -1,6 +1,6 @@
 # Walking task (clocked walk)
 
-Task IDs: `Centaur-Walking-Rough`, `-Flat`, `-Rough-SGS`, `-Flat-SGS`.
+Task IDs: `Centaur-Walking-Rough`, `-Flat`, `-Rough-SGS`.
 Code: `centaur_rl/tasks/walking/`. Shared structure, robot and reward functions: see [README.md](README.md).
 
 A 4-beat walk whose contact schedule comes from `mdp/gait.json`. The gait file fixes the **shape** of the cycle
@@ -64,16 +64,16 @@ per foot but all four only 45 % of the time; a perfect walk earns 1.5 per step v
 - `load_gait_schedule`, `gait_timing`, `gait_leg_clocks`: gait JSON → clock parameters.
 - `gait_step_table`, `resolve_gait_step_table`, `gait_stance_target`, `feet_gait` / `feet_gait_schedule`:
   table-based schedule used by the `gait_target` observation (one-step lookahead).
-- `variable_posture`: pose reward as in the velocity task.
+- `variable_posture`: pose reward as in the trot task.
 
 ### Observations
 
 `walk_phase`: `[sin, cos, min(cycles, 1)]` of the walk clock, zero when standing. The third entry separates
 the startup from rest from the repeating cycle. `gait_target` gives the scheduled stance per foot for the next step.
 
-## Differences from the velocity task
+## Differences from the trot task
 
-| Item | Velocity | Walking |
+| Item | Trot | Walking |
 |---|---|---|
 | gait | flying trot | walk (`gait.json`) |
 | `foot_gait` | +0.5, `feet_gait` | +1.5, `feet_gait_clock` |
@@ -89,9 +89,7 @@ the startup from rest from the repeating cycle. `gait_target` gives the schedule
 Command per config = `(lin_x, 0, lin_x·κ, cycle time)`; the turn sharpness is a per-config parameter.
 Success tolerance: `max_err_xy = min(0.3, 0.4·v_max)` m/s, `max_err_yaw = 0.2` rad/s, 5 % standing episodes.
 
-| | Rough-SGS | Flat-SGS |
-|---|---|---|
-| configs | 10 levels × 20 tiles × 4 spawns × 32 commands = 25,600 | 4 spawns × 1024 commands = 4,096 |
+Rough only. Configs: 10 levels × 20 tiles × 4 spawns × 32 commands = 25,600.
 
 The walking SGS still uses the older random-command design (spawn + command lists), not the axis-bin design of
-the velocity and pace tasks.
+the trot and pace tasks.

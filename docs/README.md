@@ -4,9 +4,11 @@ Per-task documentation of the rewards and the functions behind them.
 
 | Doc | Task IDs | Gait / command |
 |---|---|---|
-| [velocity.md](velocity.md) | `Centaur-Rough`, `Centaur-Flat`, `Centaur-Rough-SGS`, `Centaur-Flat-SGS` | flying trot, free (vx, vy, yaw) command, 1–2 m/s |
-| [walking.md](walking.md) | `Centaur-Walking-{Rough,Flat}[-SGS]` | 4-beat walk from `gait.json`, speed on circular arcs + cycle time |
-| [pace.md](pace.md) | `Centaur-Pace-{Rough,Flat}[-SGS]` | pace (same-side legs together) with flight phases |
+| [velocity.md](velocity.md) | `Centaur-Velocity-Rough`, `Centaur-Velocity-Flat` | Unitree's velocity task on the Centaur robot (unmodified rewards), trot gait reward, command up to ±1–2 m/s |
+| [trot.md](trot.md) | `Centaur-Trot-Rough`, `Centaur-Trot-Flat`, `Centaur-Trot-Rough-SGS` | flying trot, free (vx, vy, yaw) command, 1–2 m/s |
+| [walking.md](walking.md) | `Centaur-Walking-{Rough,Flat}`, `Centaur-Walking-Rough-SGS` | 4-beat walk from `gait.json`, speed on circular arcs + cycle time |
+| [pace.md](pace.md) | `Centaur-Pace-{Rough,Flat}`, `Centaur-Pace-Rough-SGS` | pace (same-side legs together) with flight phases |
+| [multi_policy.md](multi_policy.md) | `Multi-Gait_straight_flat_SGS` (+ `-<Gait>-<Phase>` stages) | walk → trot → canter → gallop pipeline, one policy per gait, straight line, flat, speed SGS (own layout, see the doc) |
 
 The three tasks share one structure. Everything below applies to all of them unless a task doc says otherwise.
 See also [`../REWARDS.md`](../REWARDS.md) for a combined weight/parameter table.
@@ -75,7 +77,7 @@ Defined but not wired into any config: `self_collision_cost`, `feet_air_time`, `
 
 ## Success-Guided Sampling (SGS)
 
-Implemented in `mdp/sgs.py` (arXiv:2610.12465). SGS only changes **what is sampled**, not the rewards. It replaces the
+Implemented in `mdp/sgs.py` (arXiv:2610.12465). Only the `*-Rough-SGS` tasks exist; the flat tasks use the plain curricula. SGS only changes **what is sampled**, not the rewards. It replaces the
 terrain-level and command curricula.
 
 - `SuccessGuidedSampling` (curriculum term): keeps the last 100 outcomes per configuration, scores each with a Beta

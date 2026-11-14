@@ -1,9 +1,16 @@
+# Core framework (pulls in mujoco-warp, warp-lang, rsl-rl-lib)
 mjlab
+
+# Simulation
 mujoco>=3.0
 numpy
+
+# Learning
 torch
-viser
+torchrunx
+
+# Logging / CLI / visualization
 wandb
 tyro
-torchrunx
+viser
 prettytable

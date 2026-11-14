@@ -225,24 +225,58 @@ def launch_training(task_id: str, args: TrainConfig | None = None):
 
 
 def main():
-  # Parse first argument to choose the task.
+  # --task chooses the task.
   # Import tasks to populate the registry.
   import mjlab.tasks  # noqa: F401
   import centaur_rl.tasks  # noqa: F401  (registers Centaur-* tasks)
 
-  all_tasks = list_tasks()
-  chosen_task, remaining_args = tyro.cli(
-    tyro.extras.literal_type_from_choices(all_tasks),
-    add_help=False,
-    return_unknown_args=True,
-    config=mjlab.TYRO_FLAGS,
-  )
+  all_tasks = sorted(list_tasks())
+  tasks_help = "Available tasks:\n" + "\n".join(f"  {t}" for t in all_tasks)
+
+  from centaur_rl.tasks.Multi_Policy.pipeline import PIPELINE_TASK_ID
+
+  # Pull --task NAME / --task=NAME out of argv; everything else goes to tyro.
+  # `--multi-Gait_straight_flat_SGS` is shorthand for `--task Multi-Gait_straight_flat_SGS`.
+  pipeline_flag = "--" + PIPELINE_TASK_ID[0].lower() + PIPELINE_TASK_ID[1:]
+  argv: list[str] = []
+  for a in sys.argv[1:]:
+    argv += ["--task", PIPELINE_TASK_ID] if a == pipeline_flag else [a]
+  chosen_task: str | None = None
+  remaining_args: list[str] = []
+  i = 0
+  while i < len(argv):
+    if argv[i] == "--task":
+      chosen_task = argv[i + 1] if i + 1 < len(argv) else None
+      i += 2
+    elif argv[i].startswith("--task="):
+      chosen_task = argv[i].split("=", 1)[1]
+      i += 1
+    else:
+      remaining_args.append(argv[i])
+      i += 1
+
+  if chosen_task is None:
+    if any(a in ("-h", "--help") for a in remaining_args):
+      print(f"usage: {sys.argv[0]} --task TASK [options]\n\n{tasks_help}")
+      print("\nRun with --task TASK --help for that task's options.")
+      sys.exit(0)
+    print(f"error: --task is required\n\n{tasks_help}")
+    sys.exit(2)
+  if chosen_task not in all_tasks:
+    print(f"error: unknown task '{chosen_task}'\n\n{tasks_help}")
+    sys.exit(2)
+
+  # Multi-gait pipeline: one command runs every stage (each as its own train.py process).
+  if chosen_task == PIPELINE_TASK_ID:
+    from centaur_rl.tasks.Multi_Policy.orchestrator import main_pipeline
+
+    main_pipeline(remaining_args)
 
   args = tyro.cli(
     TrainConfig,
     args=remaining_args,
     default=TrainConfig.from_task(chosen_task),
-    prog=sys.argv[0] + f" {chosen_task}",
+    prog=sys.argv[0] + f" --task {chosen_task}",
     config=mjlab.TYRO_FLAGS,
   )
   del remaining_args

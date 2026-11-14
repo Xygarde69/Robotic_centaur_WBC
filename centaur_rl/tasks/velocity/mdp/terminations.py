@@ -6,6 +6,7 @@ import torch
 
 from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
+
 from mjlab.sensor import ContactSensor
 
 if TYPE_CHECKING:
@@ -33,8 +34,9 @@ def base_too_low(
 ) -> torch.Tensor:
   """Terminate when the base sinks too close to its feet.
 
-  Terrain-agnostic replacement for a body/ground contact check, used when only the feet
-  have collision geometry. Height is base z minus the mean z of the given foot sites.
+  Centaur addition (not in the Unitree task): only the foot spheres collide, so the
+  non-foot `illegal_contact` check cannot fire. Height is base z minus the mean z of the
+  given foot sites.
   """
   asset: Entity = env.scene[asset_cfg.name]
   base_z = asset.data.root_link_pos_w[:, 2]

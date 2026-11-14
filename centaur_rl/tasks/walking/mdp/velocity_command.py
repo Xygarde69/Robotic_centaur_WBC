@@ -283,8 +283,41 @@ class UniformVelocityCommandCfg(CommandTermCfg):
 
 
 ##
-# Walk command: straight-line velocity plus a gait cycle time, and the gait clock.
+# Walk command: forward velocity along a circular arc (yaw = lin_x * curvature) plus a
+# gait cycle time, and the gait clock.
 ##
+
+
+def walk_max_curvature(
+  lin_vel_x: torch.Tensor, max_curvature: float, max_lateral_accel: float
+) -> torch.Tensor:
+  """Sharpest feasible turn (1 / radius) for each forward speed.
+
+  Bounded by the tightest radius (1 / max_curvature) and by the centripetal acceleration
+  v^2 * curvature <= max_lateral_accel, so fast walks only get wide turns.
+  """
+  v2 = lin_vel_x.square().clamp(min=1e-6)
+  return torch.clamp(max_lateral_accel / v2, max=max_curvature)
+
+
+def sample_walk_curvature(
+  lin_vel_x: torch.Tensor,
+  max_curvature: float,
+  max_lateral_accel: float,
+  straight_frac: float,
+  generator: torch.Generator | None = None,
+) -> torch.Tensor:
+  """Turn curvature (1 / radius, signed: + = left) for each forward speed.
+
+  Uniform in [-k_max(v), k_max(v)], except a straight_frac share that walks straight.
+  Zero where the robot is not moving forward, so yaw = lin_x * curvature never asks for a
+  turn on the spot.
+  """
+  n = lin_vel_x.shape[0]
+  u = 2.0 * torch.rand(n, generator=generator, device=lin_vel_x.device) - 1.0
+  straight = torch.rand(n, generator=generator, device=lin_vel_x.device) < straight_frac
+  k = u * walk_max_curvature(lin_vel_x, max_curvature, max_lateral_accel)
+  return torch.where(straight | (lin_vel_x.abs() < 1e-6), 0.0, k)
 
 
 def walk_cycle_time_range(
@@ -292,6 +325,8 @@ def walk_cycle_time_range(
   stance_fraction: float,
   stance_reach: tuple[float, float],
   cycle_time_range: tuple[float, float],
+  curvature: torch.Tensor | None = None,
+  half_track: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
   """Feasible (shortest, longest) gait cycle time for each forward speed.
 
@@ -299,10 +334,14 @@ def walk_cycle_time_range(
   stance_reach = (min, max) m, so T is in [min / (d v), max / (d v)], clipped to
   cycle_time_range. Faster speeds therefore get shorter cycles. When the stride would be
   shorter than stance_reach[0] even at the longest cycle (slow walking), both ends are
-  the longest cycle.
+  the longest cycle. On a turn of the given curvature the outer feet, half_track m off
+  the midline, move at v * (1 + half_track * |curvature|), and that is the speed used.
   """
   t_min, t_max = cycle_time_range
-  sweep = (stance_fraction * lin_vel_x.abs()).clamp(min=1e-6)
+  speed = lin_vel_x.abs()
+  if curvature is not None:
+    speed = speed * (1.0 + half_track * curvature.abs())
+  sweep = (stance_fraction * speed).clamp(min=1e-6)
   hi = (stance_reach[1] / sweep).clamp(t_min, t_max)
   lo = torch.minimum((stance_reach[0] / sweep).clamp(t_min, t_max), hi)
   return lo, hi
@@ -310,6 +349,10 @@ def walk_cycle_time_range(
 
 class WalkVelocityCommand(UniformVelocityCommand):
   """Velocity command (lin_x, lin_y, ang_z) plus a gait cycle time, as a 4-vector.
+
+  Turns are circular arcs: ang_z = lin_x * curvature with a per-command curvature
+  (1 / radius), so a yaw rate always comes with forward motion and the robot walks a
+  circle instead of turning on the spot.
 
   Also runs the gait clock: gait_cycles counts gait cycles since the robot started
   walking (unwrapped, so a cycle-time change only changes the clock rate). It is zero
@@ -325,6 +368,10 @@ class WalkVelocityCommand(UniformVelocityCommand):
       (self.num_envs,), cfg.ranges.cycle_time[1], device=self.device
     )
     self.gait_cycles = torch.zeros(self.num_envs, device=self.device)
+    self.curvature = torch.zeros(self.num_envs, device=self.device)
+    # Distance walked along the body heading this episode (integral of forward speed):
+    # the arc length on a turn, where the displacement from the start stays below 2R.
+    self.forward_distance = torch.zeros(self.num_envs, device=self.device)
     self._command = torch.zeros(self.num_envs, 4, device=self.device)
 
   @property
@@ -337,22 +384,42 @@ class WalkVelocityCommand(UniformVelocityCommand):
     v = self.vel_command_b
     return torch.norm(v[:, :2], dim=1) + torch.abs(v[:, 2]) > self.cfg.walk_threshold
 
-  def default_cycle_time(self, lin_vel_x: torch.Tensor) -> torch.Tensor:
-    lo, hi = self.cycle_time_range(lin_vel_x)
+  def default_cycle_time(
+    self, lin_vel_x: torch.Tensor, curvature: torch.Tensor | None = None
+  ) -> torch.Tensor:
+    lo, hi = self.cycle_time_range(lin_vel_x, curvature)
     return 0.5 * (lo + hi)
 
-  def cycle_time_range(self, lin_vel_x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+  def cycle_time_range(
+    self, lin_vel_x: torch.Tensor, curvature: torch.Tensor | None = None
+  ) -> tuple[torch.Tensor, torch.Tensor]:
     return walk_cycle_time_range(
-      lin_vel_x, self.cfg.stance_fraction, self.cfg.stance_reach, self.cfg.ranges.cycle_time
+      lin_vel_x,
+      self.cfg.stance_fraction,
+      self.cfg.stance_reach,
+      self.cfg.ranges.cycle_time,
+      curvature,
+      self.cfg.half_track,
     )
+
+  def _update_metrics(self) -> None:
+    super()._update_metrics()
+    self.forward_distance += self.robot.data.root_link_lin_vel_b[:, 0] * self._env.step_dt
 
   def reset(self, env_ids):
     self.gait_cycles[env_ids] = 0.0
+    self.forward_distance[env_ids] = 0.0
     return super().reset(env_ids)
 
   def _resample_command(self, env_ids: torch.Tensor) -> None:
     super()._resample_command(env_ids)
-    lo, hi = self.cycle_time_range(self.vel_command_b[env_ids, 0])
+    v = self.vel_command_b[env_ids, 0]
+    k = sample_walk_curvature(
+      v, self.cfg.max_curvature, self.cfg.max_lateral_accel, self.cfg.straight_frac
+    )
+    self.curvature[env_ids] = k
+    self.vel_command_b[env_ids, 2] = v * k
+    lo, hi = self.cycle_time_range(v, k)
     self.cycle_time[env_ids] = lo + (hi - lo) * torch.rand_like(lo)
 
   def _update_command(self) -> None:
@@ -367,7 +434,14 @@ class WalkVelocityCommand(UniformVelocityCommand):
     if self._joystick_enabled is not None and self._joystick_enabled.value:
       assert self._joystick_get_env_idx is not None
       idx = self._joystick_get_env_idx()
-      self.cycle_time[idx] = self.default_cycle_time(self.vel_command_b[idx : idx + 1, 0])[0]
+      # Keep the joystick on circular arcs too: |yaw| <= |lin_x| * k_max(lin_x).
+      v = self.vel_command_b[idx : idx + 1, 0]
+      w_max = v.abs() * walk_max_curvature(v, self.cfg.max_curvature, self.cfg.max_lateral_accel)
+      w = torch.clamp(self.vel_command_b[idx : idx + 1, 2], -w_max, w_max)
+      self.vel_command_b[idx, 2] = w[0]
+      k = torch.where(v.abs() > 1e-6, w / v.abs().clamp(min=1e-6), 0.0)
+      self.curvature[idx] = k[0]
+      self.cycle_time[idx] = self.default_cycle_time(v, k)[0]
 
 
 @dataclass(kw_only=True)
@@ -380,6 +454,11 @@ class WalkVelocityCommandCfg(UniformVelocityCommandCfg):
   stance_fraction: float = 0.5  # fraction of the cycle each foot is on the ground
   stance_reach: tuple[float, float] = (0.15, 0.45)  # m of foot sweep per stance
   walk_threshold: float = 0.1  # same dead-band as the gait reward
+  # Turning (circular arcs, ang_z = lin_x * curvature). Defaults: straight only.
+  max_curvature: float = 0.0  # 1 / tightest turn radius, 1/m
+  max_lateral_accel: float = float("inf")  # m/s^2, caps v^2 * curvature
+  straight_frac: float = 0.0  # share of walking commands with zero curvature
+  half_track: float = 0.0  # m, foot offset from the midline (outer-foot speed on turns)
 
   def build(self, env: ManagerBasedRlEnv) -> WalkVelocityCommand:
     return WalkVelocityCommand(self, env)

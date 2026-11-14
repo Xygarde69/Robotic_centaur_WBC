@@ -66,21 +66,43 @@ STANCE_REACH = 0.45
 STANCE_REACH_MIN = 0.15
 CYCLE_TIME_RANGE = (STANCE_REACH / (GAIT_STANCE_FRACTION * MAX_LIN_VEL_X), GAIT_PERIOD)
 
-# Straight-line walking only: forward speed, no lateral or yaw command.
+# Forward speed, no lateral command. The yaw command is not sampled on its own (range 0):
+# the walk command sets it to lin_x * curvature, i.e. the robot walks a circle of radius
+# 1 / curvature and never turns on the spot (see TURN_* below).
 COMMAND_RANGES = {
   "lin_vel_x": (0.0, MAX_LIN_VEL_X),
   "lin_vel_y": (0.0, 0.0),
   "ang_vel_z": (0.0, 0.0),
 }
+
+# Turning on circular arcs: yaw rate = lin_x / R. The sharpest turn is R = TURN_RADIUS_MIN,
+# further limited at speed by the centripetal acceleration v^2 / R <= TURN_MAX_LAT_ACCEL
+# (0.2 g, a lean of ~11 deg, which a walk can hold over its 2-3 foot supports). So up to
+# 1.40 m/s the 1 m circle is allowed (yaw up to 1.4 rad/s); at 1.69 m/s R >= 1.45 m.
+# Curvature is sampled uniformly in [-1/R_min(v), 1/R_min(v)]; TURN_STRAIGHT_FRAC of the
+# walking commands are kept straight. On a turn the outer feet (HALF_TRACK off the
+# midline) sweep faster, which the cycle-time range accounts for.
+TURN_RADIUS_MIN = 1.0  # m
+TURN_MAX_LAT_ACCEL = 0.2 * 9.81  # m/s^2
+TURN_STRAIGHT_FRAC = 0.25
+HALF_TRACK = 0.23  # m, foot offset from the body midline
+TURN_PARAMS = {
+  "max_curvature": 1.0 / TURN_RADIUS_MIN,
+  "max_lateral_accel": TURN_MAX_LAT_ACCEL,
+  "straight_frac": TURN_STRAIGHT_FRAC,
+  "half_track": HALF_TRACK,
+}
+
 TRACK_LIN_STD = min(0.5, 0.5 * MAX_LIN_VEL_X)
-# Yaw command is always zero, so this only penalises turning off the straight line.
-TRACK_ANG_STD = 0.25
+# Yaw rate commands reach ~1.4 rad/s; 0.5 keeps a useful gradient on large yaw errors
+# (0.25 gave ~0 reward beyond 0.5 rad/s) while still penalising drift off the arc.
+TRACK_ANG_STD = 0.5
 
 # Nominal base-to-foot-site height is 0.60 m (straight legs); below this the robot has collapsed.
 MIN_BASE_HEIGHT = 0.30
 
 # Play-only: constant forward speed command (m/s), never standing.
-PLAY_LIN_VEL_X = 0.3
+PLAY_LIN_VEL_X = 0.5
 
 
 def centaur_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -145,9 +167,10 @@ def centaur_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     r".*_3": 1.0,
   }
 
-  # Walk command: straight-line speed plus a gait cycle time (4th command entry, so the
-  # policy observes it), drawn from the range feasible for the speed. The command term
-  # also runs the gait clock, restarted from rest on every standing -> walking switch.
+  # Walk command: forward speed along a circular arc (yaw = lin_x * curvature) plus a gait
+  # cycle time (4th command entry, so the policy observes it), drawn from the range
+  # feasible for the speed and turn. The command term also runs the gait clock,
+  # restarted from rest on every standing -> walking switch.
   cfg.commands["twist"] = centaur_mdp.WalkVelocityCommandCfg(
     entity_name="robot",
     resampling_time_range=(3.0, 8.0),
@@ -159,6 +182,7 @@ def centaur_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     ),
     stance_fraction=GAIT_STANCE_FRACTION,
     stance_reach=(STANCE_REACH_MIN, STANCE_REACH),
+    **TURN_PARAMS,
   )
   cfg.curriculum["command_vel"].params["velocity_stages"] = [
     {"step": 0, **COMMAND_RANGES, "lin_vel_x": (0.0, 0.5 * MAX_LIN_VEL_X)},
@@ -202,17 +226,20 @@ def centaur_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   for axis, (lo, hi) in push_range.items():
     push_range[axis] = (push_scale * lo, push_scale * hi)
 
-  # Roll is penalised at 0.3x pitch (tilt and tilt rate): a walk shifts its weight over
-  # each three-foot support, so some side-to-side wobble is expected.
+  # Roll and pitch penalised equally (tilt and tilt rate). Roll is measured from the
+  # equilibrium lean of the current turn, theta = atan(v^2 / (r g)) with the measured
+  # forward speed v and the commanded radius r = 1 / curvature (upright when straight).
+  # The steady lean has zero roll rate, so the rate term needs no target.
   cfg.rewards["body_orientation_l2"].func = centaur_mdp.body_orientation_roll_pitch
   cfg.rewards["body_orientation_l2"].params = {
-    "roll_weight": 0.3,
+    "roll_weight": 1.0,
     "pitch_weight": 1.0,
+    "command_name": "twist",
     "asset_cfg": SceneEntityCfg("robot", body_names=("base_link",)),
   }
   cfg.rewards["body_ang_vel"].func = centaur_mdp.body_angular_velocity_roll_pitch
   cfg.rewards["body_ang_vel"].params = {
-    "roll_weight": 0.3,
+    "roll_weight": 1.0,
     "pitch_weight": 1.0,
     "asset_cfg": SceneEntityCfg("robot", body_names=("base_link",)),
   }
@@ -277,6 +304,7 @@ def centaur_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     twist_cmd = cfg.commands["twist"]
     assert isinstance(twist_cmd, centaur_mdp.WalkVelocityCommandCfg)
     twist_cmd.ranges.lin_vel_x = (PLAY_LIN_VEL_X, PLAY_LIN_VEL_X)
+    twist_cmd.max_curvature = 0.0
     twist_cmd.rel_standing_envs = 0.0
 
   return cfg
@@ -297,13 +325,15 @@ SGS_PARAMS = {
   # Thresholds scale with the gait's speed envelope, otherwise standing still would
   # count as tracking a slow gait's commands.
   "max_err_xy": min(0.3, 0.4 * MAX_LIN_VEL_X),  # m/s, episode-mean |v_cmd_xy - v_xy|
-  "max_err_yaw": 0.2,  # rad/s, episode-mean |w_z| (yaw command is always zero)
+  "max_err_yaw": 0.2,  # rad/s, episode-mean |w_z_cmd - w_z| (yaw = lin_x / R)
   "min_episode_frac": 0.5,  # ignore time-outs of truncated (randomized-start) episodes
   "standing_frac": 0.05,
   "seed": 0,
 }
-# Each SGS command config is (lin_x, 0, 0, cycle time); the cycle time is drawn per
-# config from the range feasible for its speed (faster -> shorter).
+# Each SGS command config is (lin_x, 0, lin_x * curvature, cycle time). The turn
+# sharpness (curvature = 1 / radius, TURN_PARAMS) is a per-config parameter drawn from
+# the range feasible for its speed; the cycle time is drawn per config from the range
+# feasible for its speed and turn (faster -> shorter).
 SGS_COMMAND_RANGES = {**COMMAND_RANGES, "cycle_time": CYCLE_TIME_RANGE}
 
 
@@ -321,6 +351,7 @@ def apply_sgs(
     ranges=centaur_mdp.SgsVelocityCommandCfg.Ranges(**SGS_COMMAND_RANGES),
     stance_fraction=GAIT_STANCE_FRACTION,
     stance_reach=(STANCE_REACH_MIN, STANCE_REACH),
+    **TURN_PARAMS,
   )
   cfg.events["reset_base"] = EventTermCfg(func=centaur_mdp.reset_root_state_sgs, mode="reset")
   cfg.curriculum = {
@@ -334,6 +365,7 @@ def apply_sgs(
         "command_ranges": SGS_COMMAND_RANGES,
         "stance_fraction": GAIT_STANCE_FRACTION,
         "stance_reach": (STANCE_REACH_MIN, STANCE_REACH),
+        **TURN_PARAMS,
       },
     )
   }
@@ -344,12 +376,8 @@ def apply_sgs(
 # 20 s episodes a full run is only ~250k episodes, so 104k configs would each be seen
 # ~2x and never get usable success estimates. Scale N up with num_envs (paper: 104k).
 def centaur_rough_sgs_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
-  # 10 x 20 tiles x 4 spawns x 16 commands = 12,800 configs.
+  # 10 x 20 tiles x 4 spawns x 32 commands = 25,600 configs (32 commands to cover
+  # speed x turn sharpness x cycle time).
   cfg = centaur_rough_env_cfg(play=play)
-  return cfg if play else apply_sgs(cfg, num_spawns=4, num_commands=16)
+  return cfg if play else apply_sgs(cfg, num_spawns=4, num_commands=32)
 
-
-def centaur_flat_sgs_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
-  # No tiles: 4 spawns x 1024 commands = 4,096 configs.
-  cfg = centaur_flat_env_cfg(play=play)
-  return cfg if play else apply_sgs(cfg, num_spawns=4, num_commands=1024)

@@ -1,6 +1,6 @@
 # Pace task
 
-Task IDs: `Centaur-Pace-Rough`, `-Flat`, `-Rough-SGS`, `-Flat-SGS`.
+Task IDs: `Centaur-Pace-Rough`, `-Flat`, `-Rough-SGS`.
 Code: `centaur_rl/tasks/pace/`. Shared structure, robot and reward functions: see [README.md](README.md).
 
 A copy of the [walking task](walking.md) (same arc command, turn lean, gait clock, observations) with a different
@@ -59,10 +59,12 @@ All of walking's, plus:
 
 Axis-bin design (`mdp/sgs.py`): a configuration is terrain level × terrain type × one cell of the command grid.
 
-| | Rough-SGS | Flat-SGS |
-|---|---|---|
-| axes | `lin_vel_x` [0.3, 1.69], `turn` [−1, 1] | same |
-| bins | 6 × 5 × 200 tiles = 6,000 configs | 24 × 15 = 360 configs |
+Rough only.
+
+| | Rough-SGS |
+|---|---|
+| axes | `lin_vel_x` [0.3, 1.69], `turn` [−1, 1] |
+| bins | 6 × 5 × 200 tiles = 6,000 configs |
 
 `turn` sets curvature = turn · κ_max(v), yaw = v · curvature (arcs only); the middle bin is exactly straight
 (`snap_center`). 5 % of episodes are standing and sit outside the config set. Success tolerance:

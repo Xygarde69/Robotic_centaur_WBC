@@ -110,12 +110,20 @@ def body_orientation_roll_pitch(
   env: ManagerBasedRlEnv,
   roll_weight: float = 1.0,
   pitch_weight: float = 1.0,
+  command_name: str | None = None,
+  gravity: float = 9.81,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-  """body_orientation_l2 with separate roll and pitch weights.
+  """body_orientation_l2 with separate roll and pitch weights, roll measured from the
+  equilibrium lean of the commanded turn.
 
-  Projected gravity in the body frame: its y component grows with roll, its x component
-  with pitch.
+  Projected gravity in the body frame: its y component is sin(roll-ish lean), its x
+  component grows with pitch. Walking a circle of radius r = 1 / curvature at speed v
+  needs a centripetal acceleration v^2 / r, which is balanced by leaning into the turn by
+  theta = atan(v^2 / (r g)). At that lean gravity has body-frame y component sin(theta)
+  (positive = leaning left, for a left turn, curvature > 0), so the roll penalty is
+  (g_y - sin(theta))^2. v is the measured forward speed at this instant, curvature is
+  the walk command's (see WalkVelocityCommand). Without command_name the target is upright.
   """
   asset: Entity = env.scene[asset_cfg.name]
   if asset_cfg.body_ids:
@@ -123,7 +131,14 @@ def body_orientation_roll_pitch(
     g = quat_apply_inverse(body_quat_w, asset.data.gravity_vec_w)
   else:
     g = asset.data.projected_gravity_b
-  return pitch_weight * torch.square(g[:, 0]) + roll_weight * torch.square(g[:, 1])
+  roll_target = torch.zeros_like(g[:, 1])
+  if command_name is not None:
+    curvature = env.command_manager.get_term(command_name).curvature
+    v = asset.data.root_link_lin_vel_b[:, 0]
+    roll_target = torch.sin(torch.atan(v.square() * curvature / gravity))
+  return pitch_weight * torch.square(g[:, 0]) + roll_weight * torch.square(
+    g[:, 1] - roll_target
+  )
 
 
 def body_angular_velocity_roll_pitch(

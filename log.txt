@@ -172,3 +172,304 @@ Verified (Centaur-Gallop-Flat, 1024 envs, 300 iters, 1 seed, half-range command 
   iter 299: foot match 0.76, exact 4-foot match 0.40 (both still rising), ep len 1000/1000,
             no fell_over / base_too_low, track_lin_vel 0.64, track_ang_vel 0.63
   Not yet a perfect gait: a full-length run is needed to see where exact match plateaus.
+
+
+[2026-11-13/14] WALKING - gallop task renamed to walking, clocked walk gait
+---------------------------------------------------------------------------
+Scope: centaur_rl/tasks/walking (was tasks/gallop) plus the shared motor limit. The trot
+task (centaur_rl/tasks/velocity) is untouched. The shared robot files (centaur_constants.py,
+mjcf/centaur.xml, mjcf/centaur_train.xml) changed for the 120 Nm motors, so the trot gets
+120 Nm too. Tasks: Centaur-Walking-{Flat,Rough,Flat-SGS,Rough-SGS}; runs go to
+scripts/logs/rsl_rl/centaur_walking.
+
+A. MDP FOLDER CHANGES (centaur_rl/tasks/walking/mdp)
+   curriculums.py, terminations.py, __init__.py: identical to the velocity task.
+
+1. velocity_command.py
+   - NEW walk_cycle_time_range(v, duty, stance_reach, cycle_time_range): the shortest and
+     longest gait cycle allowed for a forward speed. A planted foot sweeps v * duty * T, kept
+     within stance_reach = (0.15, 0.45) m, so T in [0.15/(d v), 0.45/(d v)], clipped to
+     [0.509, 1.66] s.
+     WHY: the user wanted cycle time as a parameter, shorter at higher speed. Bounding the
+     stride keeps the leg inside its reach at every speed.
+   - NEW WalkVelocityCommand / WalkVelocityCommandCfg: command is a 4-vector
+     (lin_x, lin_y, ang_z, cycle_time). The cycle time is drawn from the feasible range at
+     every resample, and the policy sees it through the command observation.
+   - The command term also runs the gait clock: gait_cycles counts cycles since walking
+     started (unwrapped), is 0 while standing, and restarts at every episode reset and every
+     standing -> walking switch.
+     WHY: the walk must start from rest with FR's long first stride (gait.json P0). A clock
+     tied to episode time would start the walk mid-cycle. Counting cycles, not seconds,
+     means a cycle-time change only changes the clock rate, with no phase jump.
+   - Joystick (play GUI): the cycle time follows the slider speed (middle of its range).
+
+2. sgs.py
+   - Each SGS command config is now (lin_x, lin_y, ang_z, cycle_time). The cycle time is
+     sampled per config from walk_cycle_time_range for that config's speed.
+   - SgsVelocityCommand inherits WalkVelocityCommand, so SGS episodes get the clock too.
+   - New log metric sampled_cycle_time.
+   WHY: cycle time is part of the task SGS samples, so the success-guided curriculum also
+   covers cadences.
+
+3. observations.py
+   - NEW walk_phase: [sin(2 pi c), cos(2 pi c), min(c, 1)] of the walk clock c, all zero
+     while standing.
+     WHY: sin/cos is the trot's phase observation. The third entry separates the startup
+     from rest (legs still waiting for their first lift-off) from the repeating cycle, which
+     sin/cos cannot.
+   - (Old, now unused: phase, gait_target.)
+
+4. rewards.py
+   - NEW gait_leg_clocks(durations, stance_table): turns gait.json into trot-style clocks.
+     Period = time between the same leg's two lift-offs (FR: P0 -> P8) = 1.66 s. Air time =
+     each leg's first swing (0.79 s, wrapping past the end of the JSON for RR). Duty =
+     0.524. Per-leg start times FR 0, RL 0.415, FL 0.83, RR 1.245 s, i.e. lift phases
+     0 / 0.25 / 0.5 / 0.75 of the cycle.
+     WHY: user asked for each leg to run its own cycle on the clock, started at different
+     times, rewarded like the trot.
+     Verified: the clock reproduces all 9 gait.json phases, P0 startup included.
+   - NEW walk_gait_cycles: reads the clock from the command, one step ahead for rewards.
+     WHY: rewards are computed before the clock ticks. The lookahead matches the time the
+     trot's feet_gait uses.
+   - NEW feet_gait_clock (foot_gait term): stance while (c + offset) % 1 < duty, and a leg
+     stays on the ground while c < its lift phase (startup). Reward =
+     (1 - exact_weight) * fraction of feet matching + exact_weight * [all 4 match]. Logs
+     Metrics/gait_foot_match and Metrics/gait_exact_match. Only contact timing is rewarded,
+     never foot height.
+   - NEW feet_contact_in_swing: fraction of feet on the ground while their clock says swing.
+   - Both use the shared _WalkClockTerm, which permutes offsets from LEG_NAMES order
+     (FR, FL, RR, RL) to contact-sensor order (FL, FR, RL, RR).
+     WHY: the sensor orders feet by model order. The trot gets away without this only
+     because its diagonal pairs are symmetric.
+   - NEW body_orientation_roll_pitch: pitch_w * g_x^2 + roll_w * g_y^2 (projected gravity).
+   - NEW body_angular_velocity_roll_pitch: same split for roll and pitch rates, in the body
+     frame. The original used world x/y, which only lines up with roll and pitch when the
+     robot faces world +x.
+   - (Old, now unused: feet_gait_schedule, gait_step_table, resolve_gait_step_table,
+     gait_stance_target, gait_timing.)
+
+B. COMMANDS, SPEEDS AND OTHER CONFIG (walking/config/centaur/env_cfgs.py)
+   - Max walk speed 1.687 m/s = sqrt(Fr g L), Froude 0.5, leg L = 0.58 m.
+     WHY: animals leave the walk for a trot at Fr ~0.5. Above it a stiff-legged walk lifts
+     off. lin_x range = (0, min(2, 1.687)).
+   - Straight walking only: lin_y = ang_z = 0, heading command off. WHY: user request.
+   - Cycle time range [0.509, 1.66] s. 0.509 s reaches 1.687 m/s with a full 0.45 m stride
+     (0.24 s swing). 1.66 s is gait.json's own cycle. At 1.66 s the speed band is 0.17-0.52
+     m/s. Below 0.17 m/s the cycle is forced to 1.66 s and strides drop under 0.15 m.
+   - Play: constant lin_x = 0.3 m/s, no standing envs (user request).
+   - Curriculum: lin_x (0, 0.84) until 120k env steps (iteration 5000), then (0, 1.687).
+   - Tracking stds: lin 0.5 (= min(0.5, 0.5 v_max)); ang 0.25 (yaw command is always 0, so
+     this only penalises turning off the line).
+   - SGS success: mean xy error < 0.3 m/s, mean yaw-rate error < 0.2 rad/s.
+   - pose hip ab/ad std 0.4 walking/running (trot 0.15): the three-foot and lateral two-foot
+     supports need the CoM shifted over them, which takes up to ~0.4 rad of ab/ad.
+   - Motors: 40 -> 120 Nm (MJCF actuatorfrcrange and EFFORT_LIMIT). WHY: real motor peak
+     is 120 Nm. The MJCF's 40 Nm joint limit was silently capping EFFORT_LIMIT = 100.
+
+C. REWARD WEIGHTS AND REASONING (walking; "trot" = velocity task value)
+   Per-step reference: a perfect walk earns foot_gait 1.5 + tracking 2.0 + pose ~0.9.
+
+   foot_gait  +1.5, exact_weight 0.5   (trot +0.5, per-foot fraction only)
+     The per-foot fraction alone cannot tell a walk from a trot: a best-aligned trot matches
+     75% of the walk's foot states, so a perfect walk earned only 0.19/step more than a
+     trot. All four feet match only 45% of the time in a trot vs 100% in a walk, so half the
+     term is paid on that. Perfect walk 1.5 vs trot ~0.9 (gap ~0.6), larger than what a
+     trot gains in balance and tracking. Weight raised 0.5 -> 0.75 -> 1.5 as the user asked
+     for gait accuracy over robustness.
+     Measured (model_800, before the clearance change): foot match 0.91, exact match 0.70.
+   foot_contact_in_swing  -0.5   (new)
+     User request: a slight penalty for a foot on the ground when the clock says air.
+     Costs a trot ~0.06/step and all-feet-planted 0.24/step, so it nudges rather than
+     dominates.
+   track_linear_velocity  +1.0, std 0.5   (trot same)
+     Kept from Go2. KNOWN ISSUE: lenient. Walking 0.34 m/s on a 0.84 m/s command still earns
+     37%. Measured model_800 speed saturates at ~0.3 m/s for any command (stride ~0.13 m).
+     Candidate fix: std 0.25 and/or weight 2.0.
+   track_angular_velocity  +1.0, std 0.25   (trot std 0.707)
+     Yaw command is always 0, so this rewards not turning. The std was tightened from the
+     trot's because it can no longer scale with a max turn rate (0).
+     Measured: heading drift ~5-10 deg per 10 s, crab angle ~7-8 deg.
+   pose  +1.0, std walking hip 0.4 / thigh 0.35 / knee 0.8   (trot hip 0.15)
+     Keeps joints near the default stance. Hip ab/ad widened for the walk's support shifts.
+     KNOWN ISSUE: thigh std 0.35 discourages the ~0.6 rad thigh swing a 0.34 m stride needs.
+     Candidate fix: thigh 0.6.
+   body_orientation_l2  -1.0, roll x0.3, pitch x1.0   (trot roll = pitch = 1.0)
+     User request: loosen roll wobble. A walk rocks sideways onto each three-foot support.
+     Pitch stays fully penalised.
+   body_ang_vel  -0.05, roll x0.3, pitch x1.0, body frame   (trot world x/y, both 1.0)
+     Same reasoning as orientation. Body frame so it penalises real roll and pitch rates
+     whatever the heading.
+   foot_clearance  -0.3, target 0.13 m   (trot -1.0, 0.15 m)
+     Cost = sum |foot z - target| * foot xy speed. History: target 0.15 -> 0.20 -> 0.13,
+     weight -1.0 -> -1.25 -> -0.3.
+     WHY lowered: it was the largest penalty (-0.30/step at -1.25). Because it scales with
+     foot speed, a still, hovering foot costs nothing, so it encouraged lift-hover-snap
+     swings (seen in play) and penalised long, fast strides. 0.13 m is close to the
+     reachable swing height (measured peaks 6-12 cm).
+   foot_slip  -0.25   (trot same)
+     Kept from Go2: penalises stance-foot sliding (squared speed). Small (-0.01/step measured).
+   soft_landing  -0.001   (trot same)
+     Kept from Go2: penalises touchdown impact force. Tiny weight because forces are in N.
+   stand_still  -1.0   (trot same)
+     Kept: joint deviation from default when commanded to stand.
+   is_terminated  -200   (trot same)
+     Kept: falling must cost more than any per-step gain.
+   joint_pos_limits  -10   (trot same)
+     Kept: keeps joints away from their limits (soft limit at 90% of the range).
+   action_rate_l2  -0.05   (trot same)
+     Kept: smooths actions (-0.02/step measured).
+   joint_acc_l2  -2.5e-7   (trot same)
+     Kept: tiny weight because joint accelerations are large (rad/s^2).
+   angular_momentum  -0.025   (trot same)
+     Kept: whole-body angular momentum, discourages flailing.
+
+D. KNOWN PROBLEMS / NEXT STEPS
+   - Speed tracking (model_800, 2026-11-13_21-01-24): 0.19 / 0.30 / 0.34 / 0.32 m/s for
+     0.3 / 0.6 / 0.84 / 1.0 commanded. Stride is fixed at ~0.13 m and only cadence follows
+     the command. Rewards that would help: a stride-length reward at touchdown
+     (foot travel since lift-off vs speed * cycle time), tighter tracking, thigh pose
+     std 0.6.
+   - Sideways drift ~0.04 m/s (looks diagonal at low speed) plus heading drift. Nothing
+     penalises small lateral or heading errors much.
+   - Lift-hover-snap swings: expected to ease with the lower clearance weight. If not, make
+     clearance independent of foot speed and swing-only.
+   - Checkpoints before the walk command (4-dim) and walk_phase (3-dim) obs do not load.
+     Runs at 40 Nm were trained on a weaker robot: retrain, don't resume.
+
+
+[2026-11-14] Flying trot for the velocity task, new Pace task
+----------------------------------------------------------------
+User request: no all-feet-down transition in the trot (all feet in the air instead, with a
+slight reward), lin_x always above 1 m/s, air time growing with translational speed, and a
+Pace task set up like walking with the same flight transitions and the trot's cycle time.
+
+A. Velocity task (centaur_rl/tasks/velocity)
+   mdp/rewards.py
+   - feet_gait: optional flight_fraction / flight_speed_range. Stance fraction is
+     threshold - flight(|cmd_xy|) with flight linear in speed. With threshold 0.5 the two
+     diagonal pairs' stances are separated by flight phases (was 0.56: 0.036 s overlaps
+     with all four feet down).
+   - feet_suspension (new): 1 while the schedule is in flight and no foot is in contact.
+     Logs Metrics/flight_phase_airborne.
+   - track_linear_velocity: z_weight param (default 2, unchanged behaviour).
+   - 1e-4 phase bias: float32 round-off put step 30 of a 30-step cycle at phase 0.99999.
+   config/centaur/env_cfgs.py
+   - flight(v) = 0.02 + 0.06 v of the cycle per flight phase: 0.048 s at 1 m/s, 0.084 s
+     at 2 m/s; foot air time 0.348 -> 0.384 s. WHY these: 0.084 s needs a 0.41 m/s
+     take-off (~1 cm apex), and the stance sweep at 2 m/s is 0.43 m, within leg reach.
+   - foot_suspension +0.3: at most +0.05 (1 m/s) to +0.08 (2 m/s) per step on average.
+   - Commands: lin_x (1, 2), first stage (1, 1.5); rel_standing_envs 0; SGS standing_frac
+     0. lin_y narrowed to +-0.5 (first stage +-0.3; was +-1): +-1 m/s sideways on top of a
+     1-2 m/s flying trot is not a reasonable target. ang_z unchanged (+-1).
+   - track_linear_velocity z_weight 0.5: bouncing at up to ~0.4 m/s cost about half of the
+     tracking reward at weight 2.
+   - pose running_threshold 1.0 (was 1.5): every command is now a running command.
+   NOTE: the policy is never commanded to stand or go backward any more. stand_still is
+   still configured but never active.
+
+B. Pace task (centaur_rl/tasks/pace, Centaur-Pace-{Rough,Flat}[-SGS])
+   Copy of the walking task as of this date (including its uncommitted changes), without
+   gait.json. experiment_name centaur_pace.
+   - Gait: offsets FR/RR 0.5, FL/RL 0 on the walk clock, stance fraction 0.5 - flight(v)
+     with the same flight(v) as the trot. Sequence from rest: right pair in the air,
+     flight, left pair in the air, flight.
+   - Cycle time fixed to 0.6 s (cycle_time range (0.6, 0.6)); the 4-dim command and
+     walk_phase obs are kept so the setup matches walking.
+   - mdp/rewards.py: _WalkClockTerm._targets takes the flight params; feet_suspension
+     added as a clock term. Rewards: foot_gait +1.5 (exact 0.5), foot_contact_in_swing
+     -0.5, foot_suspension +0.3, track_linear_velocity z_weight 0.5. Rest as walking.
+   - Speed range (0, 1.69) and the 5% standing commands are walking's; at low speed the
+     flight phase shrinks to about one control step (0.02 + 0.06 v of the cycle).
+   Checked: all Centaur-* tasks build and step; scheduled patterns printed per speed.
+   Not trained yet.
+
+C. SGS for rough training (velocity and pace; mdp/sgs.py rewritten in both, same design)
+   User request: give SGS the appropriate parameters (e.g. curvature for the pace, which
+   never turns on the spot) and make it ready for rough training.
+   - Configuration = terrain level x terrain type x cell of a command-parameter grid
+     (named axes with bins), as the paper's product of axes. Was: K random commands.
+       velocity: lin_vel_x x lin_vel_y x ang_vel_z. Rough 4x3x3 x 200 tiles = 7,200;
+                 flat 8x5x7 = 280.
+       pace:     lin_vel_x (0.3-1.69) x turn (-1..1, curvature = turn * k_max(v), yaw =
+                 v * curvature; middle bin exactly straight). Rough 6x5 x 200 = 6,000;
+                 flat 24x15 = 360. Cycle time is no longer sampled (fixed 0.6 s).
+     Each episode draws its command uniformly inside its cell. WHY: covers the continuous
+     range with few configs, and every axis is evenly covered (32 random commands left
+     gaps in speed x turn).
+   - N sized for ~1K envs: ~250k episodes per run, so 6-7k configs get ~35-40 outcomes
+     each. Was 12,800 / 25,600 (10-20 each, H=100 never filled).
+   - Spawn offset/heading random per reset, no longer a config axis. WHY: the robot
+     starts on the tile centre and the terrains are symmetric about it, so 4 fixed
+     spawns only multiplied N by 4.
+   - Success decided on the config's own tile. WHY: at 1-2 m/s the robot leaves its 8 m
+     tile after 2-4 s and spends the rest of the 20 s on other tiles; before, a fall
+     three tiles away was charged to the starting tile. Now: leaving the tile (3.75 m
+     from its origin) freezes the outcome = tracked while on it; falling on it = failure.
+   - Tracking test on the mean velocity (signed error) instead of the mean absolute
+     error, first 1 s left out, speed tolerance relative to the command. WHY: the flight
+     gaits and the pace's sway give a large within-stride ripple that is not a tracking
+     error; accelerating to 2 m/s dominated short on-tile episodes; a fixed 0.3 m/s lets
+     standing still pass for a slow pace.
+   - Pace: 5% standing episodes outside the config set (standing_prob). WHY: a standing
+     config always succeeds, so SGS would almost never sample it.
+   - New logs: episode_left_tile_frac, success_easy_levels / success_hard_levels,
+     sampled_<axis>.
+   Checked: all four SGS tasks build and run 600+ steps; pace commands satisfy yaw = v *
+   curvature within k_max, cycle 0.6; recording verified for left-tile success / tracking
+   failure / unfinished cases. Walking's SGS untouched. Not trained yet.
+
+
+
+[2026-11-14] MULTI-GAIT PIPELINE - centaur_rl/tasks/Multi_Policy (new task folder)
+----------------------------------------------------------------------------------
+User request: train walk -> trot -> canter -> gallop in one run, straight line (lin_x
+only), flat, speed set by SGS from low to high; each gait forks from the previous one
+with a fresh critic and fresh rewards; separate random-speed refinement per gait; gaits
+after the walk spawn at their minimum speed; one policy per gait. Rewards left as
+placeholders (designed gait by gait later). Entry: train.py --task
+Multi-Gait_straight_flat_SGS (or the shorthand flag --multi-Gait_straight_flat_SGS).
+Doc: docs/multi_policy.md. Other tasks untouched; scripts/train.py only gained the
+pipeline dispatch.
+
+A. Structure
+   gaits.py        GaitSpec per gait: speed range, contact clock (touchdown phases +
+                   duty), stride frequency f(v), spawn, terminations, SGS bins, stage
+                   budgets. Adding a gait = one GaitSpec + one rewards/<gait>.py.
+   pipeline.py     stage graph (ladder / refine / record banks / handoff), order check.
+   orchestrator.py runs each job as its own train.py subprocess, chains checkpoints via
+                   results/<job>.json, resumable manifest pipeline.json.
+   env_cfg.py      make_env_cfg(gait, phase): one factory for all 12 stage tasks
+                   (Multi-Gait_straight_flat_SGS-<Gait>-<Ladder|Refine|Handoff>).
+   mdp/            gait command + clock, SpeedSGS, spawn/handoff reset, obs, generic
+                   reward functions, metrics.
+   rewards/        common.py (shared placeholder terms) + walk/trot/canter/gallop.py.
+   rl/             MultiGaitRunner (fork / continue init, critic warmup, std floor,
+                   normalizer re-adaptation, banks, ONNX, result JSON).
+   tools/          record_handoff.py (handoff state banks).
+
+B. Decisions and why
+   - Forks chain through the LADDERS (default: the ladder's last checkpoint, 1000 it):
+     the user's point 3, the next gait starts while the policy still explores.
+   - Ladder = SGS over speed bins with 80% at the frontier (V_current) and 20% replay;
+     the frontier advances on success (0.8 over >= 50 outcomes), not on a fixed
+     iteration. Refine = SGS over the whole range + mid-episode resampling up and down.
+   - Fork: actor + actor normalizer only, fresh critic/optimizer, 200 critic-only
+     iterations, std >= 0.6, normalizer count capped at 2M samples (it is a cumulative
+     mean; otherwise gallop observations barely move walk statistics).
+   - Fixed for every gait: obs layout (gait one-hot, per-leg sin/cos clock, duty,
+     [v_cmd, f]), action scale 0.5 (was 0.25, sized for the gallop), torque 400 Nm
+     (sim-only robot, user point 13), kp/kd, 50 Hz.
+   - Trot/canter/gallop spawn moving at the episode's commanded speed; walk at rest.
+   - Handoff banks recorded from each refined policy at its top / lowest speed, used by
+     the next gait's refine (20% of resets) and by optional handoff stages (50%).
+   - Gait metrics logged (foot/exact clock match, measured duty, flight share, peak
+     torque, power) so a gait collapsing into another is visible.
+
+C. Known issues / open
+   - Walk 0-1.00 and trot 1.40-2.80 leave a 1.0-1.4 m/s gap (warned at start).
+   - Gallop top speed 8 m/s and every clock / duty / stride / termination value are
+     placeholders; rewards are the common placeholder set for all four gaits.
+   Checked: all 13 tasks build; obs/action dims equal for all gaits (57/88/12); clock
+   patterns per gait; spawn speed = command; ladder advance logic; fork keeps the actor
+   bit-identical through critic warmup and trains it after; full 18-job pipeline ran end
+   to end (3-iteration stages, 64 envs) including fail -> --resume. Not trained yet.

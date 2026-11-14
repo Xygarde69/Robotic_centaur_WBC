@@ -15,6 +15,9 @@ Adaptation to this velocity-tracking task (the paper does goal reaching):
     Sizes are set in config/centaur/env_cfgs.py (scaled down from the paper's 104k to
     suit ~1K parallel envs; see the comment there).
   * The command is held fixed for the whole episode (it is the episode's "goal").
+    Walking commands are (lin_x, 0, lin_x * curvature, cycle time): the turn sharpness
+    (curvature = 1 / radius) is a per-configuration parameter, so the robot walks a
+    circle of that radius rather than turning on the spot.
   * "Command-success" = episode ran to time-out (no failure termination) AND its mean
     linear (xy) and yaw-rate tracking errors are below thresholds.
   * SGS replaces the hand-designed terrain-level and command-velocity curricula.
@@ -43,6 +46,7 @@ from mjlab.utils.lab_api.math import quat_from_euler_xyz, quat_mul
 from .velocity_command import (
   WalkVelocityCommand,
   WalkVelocityCommandCfg,
+  sample_walk_curvature,
   walk_cycle_time_range,
 )
 
@@ -89,9 +93,12 @@ class SuccessGuidedSampling:
     ).to(self.device)
 
     # Fixed commands (lin_x, lin_y, ang_z, cycle_time). A fraction is pure standing.
-    # The gait cycle time is part of each configuration: it is drawn from the range that
-    # is feasible for the config's forward speed (see walk_cycle_time_range), so faster
-    # configs get shorter cycles.
+    # The turn sharpness (curvature = 1 / radius) is part of each configuration, drawn
+    # from the range feasible for the config's forward speed (see walk_max_curvature),
+    # and the yaw rate is lin_x * curvature: a circular arc, never a turn on the spot.
+    # The gait cycle time is too: it is drawn from the range that is feasible for the
+    # config's speed and turn (see walk_cycle_time_range), so faster configs get shorter
+    # cycles.
     K = p.get("num_commands", 64)
     cr = p["command_ranges"]
     vel = torch.stack(
@@ -102,11 +109,21 @@ class SuccessGuidedSampling:
     n_stand = int(math.ceil(p.get("standing_frac", 0.05) * K))
     vel[:n_stand] = 0.0
     vel[torch.linalg.norm(vel, dim=-1) < 0.1] = 0.0  # same dead-band as the task
+    curv = sample_walk_curvature(
+      vel[:, 0],
+      p.get("max_curvature", 0.0),
+      p.get("max_lateral_accel", float("inf")),
+      p.get("straight_frac", 0.0),
+      generator=gen,
+    )
+    vel[:, 2] = vel[:, 0] * curv
     lo, hi = walk_cycle_time_range(
-      vel[:, 0], p["stance_fraction"], tuple(p["stance_reach"]), tuple(cr["cycle_time"])
+      vel[:, 0], p["stance_fraction"], tuple(p["stance_reach"]), tuple(cr["cycle_time"]),
+      curv, p.get("half_track", 0.0),
     )
     cycle = lo + (hi - lo) * torch.rand(K, generator=gen)
     self.commands = torch.cat([vel, cycle.unsqueeze(-1)], dim=-1).to(self.device)
+    self.curvatures = curv.to(self.device)
 
     self.num_spawns, self.num_commands = S, K
     self.num_configs = self.rows * self.cols * S * K
@@ -140,6 +157,9 @@ class SuccessGuidedSampling:
 
   def command_of(self, env_ids: torch.Tensor) -> torch.Tensor:
     return self.commands[self.decode(self.env_cfg[env_ids])[3]]
+
+  def curvature_of(self, env_ids: torch.Tensor) -> torch.Tensor:
+    return self.curvatures[self.decode(self.env_cfg[env_ids])[3]]
 
   # ------------------------------------------------------------------ SGS core
   def success_rates(self) -> torch.Tensor:
@@ -207,6 +227,8 @@ class SuccessGuidedSampling:
       "sampled_terrain_level": r.float().mean(),
       "sampled_cmd_speed": torch.linalg.norm(self.commands[self.decode(new)[3], :2], dim=-1).mean(),
       "sampled_cycle_time": self.commands[self.decode(new)[3], 3].mean(),
+      "sampled_turn_curvature": self.curvatures[self.decode(new)[3]].abs().mean(),
+      "sampled_yaw_rate": self.commands[self.decode(new)[3], 2].abs().mean(),
       "probs_max_over_uniform": probs.max() * self.num_configs,
     }
 
@@ -272,6 +294,7 @@ class SgsVelocityCommand(WalkVelocityCommand):
       cmd = sgs.command_of(env_ids)
       self.vel_command_b[env_ids] = cmd[:, :3]
       self.cycle_time[env_ids] = cmd[:, 3]
+      self.curvature[env_ids] = sgs.curvature_of(env_ids)
       self.is_standing_env[env_ids] = False
       self.is_heading_env[env_ids] = False
     self.ep_err_xy[env_ids] = 0.0
