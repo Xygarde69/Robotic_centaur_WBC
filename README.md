@@ -13,6 +13,7 @@ mjcf/centaur.xml            full CAD export (unchanged)
 mjcf/build_train_xml.py     -> mjcf/centaur_train.xml (legs-only training model)
 centaur_rl/assets/robots/centaur/centaur_constants.py   actuators, stance, collisions
 centaur_rl/tasks/velocity/config/centaur/               env + PPO config (Centaur-Flat / Centaur-Rough)
+centaur_rl/tasks/walking/                                   copy of velocity (Centaur-Walking-* tasks), to be adapted for walking
 centaur_rl/tasks/velocity/{velocity_env_cfg.py,mdp,rl}  copied from unitree_rl_mjlab
 scripts/{train,play,list_envs}.py                       copied from unitree_rl_mjlab
 ```

@@ -1,0 +1,59 @@
+{
+  "gait": "WALK",
+  "phases": [
+    {
+      "phase": "P0",
+      "type": "main",
+      "duration": 0.375,
+      "feet": { "FL": "ground", "FR": "air", "RL": "ground", "RR": "ground" }
+    },
+    {
+      "phase": "P1",
+      "type": "transition",
+      "duration": 0.04,
+      "feet": { "FL": "ground", "FR": "air", "RL": "ground", "RR": "ground" }
+    },
+    {
+      "phase": "P2",
+      "type": "main",
+      "duration": 0.375,
+      "feet": { "FL": "ground", "FR": "air", "RL": "air", "RR": "ground" }
+    },
+    {
+      "phase": "P3",
+      "type": "transition",
+      "duration": 0.04,
+      "feet": { "FL": "ground", "FR": "ground", "RL": "air", "RR": "ground" }
+    },
+    {
+      "phase": "P4",
+      "type": "main",
+      "duration": 0.375,
+      "feet": { "FL": "air", "FR": "ground", "RL": "air", "RR": "ground" }
+    },
+    {
+      "phase": "P5",
+      "type": "transition",
+      "duration": 0.04,
+      "feet": { "FL": "air", "FR": "ground", "RL": "ground", "RR": "ground" }
+    },
+    {
+      "phase": "P6",
+      "type": "main",
+      "duration": 0.375,
+      "feet": { "FL": "air", "FR": "ground", "RL": "ground", "RR": "air" }
+    },
+    {
+      "phase": "P7",
+      "type": "transition",
+      "duration": 0.04,
+      "feet": { "FL": "ground", "FR": "ground", "RL": "ground", "RR": "air" }
+    },
+    {
+      "phase": "P8",
+      "type": "main",
+      "duration": 0.375,
+      "feet": { "FL": "ground", "FR": "air", "RL": "ground", "RR": "air" }
+    }
+  ]
+}

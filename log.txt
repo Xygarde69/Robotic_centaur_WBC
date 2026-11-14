@@ -144,3 +144,31 @@ Verified (Centaur-Flat, 1024 envs, 150 iters, 1 seed):
   iter 100: episode length 1000/1000, reward 33.0
   iter 149: reward 41.9, ep len 995, track_lin_vel 0.60, no fell_over
   (welded-upper-body version at iter 149: reward 19.3, ep len 869, track_lin_vel 0.27)
+
+
+[2026-11-13] GALLOP - Reward and commands tuned around mdp/gait.json
+--------------------------------------------------------------------
+Scope: centaur_rl/tasks/gallop only (velocity task untouched). Details in REWARDS.md.
+1. BUG: the gait table was built in LEG_NAMES order (FR, FL, RR, RL) but the contact sensor
+   orders feet by model order (FL, FR, RL, RR), so the rewarded gait was mirrored left/right.
+   The gait terms now map columns to the sensor order (resolve_gait_step_table).
+2. feet_gait_schedule is a class term: integer control-step lookup (exact phase boundaries),
+   reward = 0.5 * foot-match fraction + 0.5 * [all four match], weight 0.5 -> 2.0.
+   WHY: all-feet-planted already scored 0.53 of the old term, so the gait was worth only
+   ~0.24/step against 3.0 of tracking + pose.
+3. Command ranges, tracking stds, command curriculum, play ranges and SGS ranges/thresholds
+   derived from the gait: v_max = 0.45 m / stance time (0.237 m/s for the 1.9 s stance).
+   WHY: the old 2 m/s commands need a 3.8 m stride per stance; tracking them forces the
+   policy to break the schedule.
+4. pose hip ab/ad std 0.15 -> 0.4 (walking/running): the same-side two-foot supports need
+   the CoM over a line 0.23 m off the midline.
+5. push_robot velocities x0.47 (2 * v_max).
+6. Observations: phase clock hides only when the gait reward's standing test is true
+   (was a different norm); new gait_target term (4 dims) in actor and critic. Actor obs is
+   now 51-dim on flat, so earlier gallop checkpoints do not load.
+
+Verified (Centaur-Gallop-Flat, 1024 envs, 300 iters, 1 seed, half-range command stage):
+  schedule table equals gait.json at all 180 control steps, in sensor order
+  iter 299: foot match 0.76, exact 4-foot match 0.40 (both still rising), ep len 1000/1000,
+            no fell_over / base_too_low, track_lin_vel 0.64, track_ang_vel 0.63
+  Not yet a perfect gait: a full-length run is needed to see where exact match plateaus.

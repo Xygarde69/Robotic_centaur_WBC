@@ -10,9 +10,13 @@ What this does to the CAD-exported model:
 * The floating base is re-oriented so the free-joint body `base_link` is x-forward,
   y-left, z-up (what mjlab's velocity commands / projected gravity assume). In the CAD
   export base_link is +y-up / +z-forward (torso end = front).
-* Collision: ONLY the four calf meshes collide (`<leg>_calf_collision`, convex hull of
-  the calf mesh). Every other geom (base, hips, thighs, upper body) is visual only.
+* Collision: ONLY a sphere at the tip of each calf collides (`<leg>_foot_collision`,
+  radius `FOOT_SPHERE_RADIUS`). The calf mesh hulls no longer collide (set
+  `CALF_MESH_COLLIDES = True` to keep them as well). Every other geom (base, hips, thighs, upper body) is visual only.
 * Each calf gets a foot site (`<leg>`) near the calf tip, used for foot height/slip terms.
+* Knee (`<leg>_3`) ranges are made one-way for a horse-like "<>" stance: front knees
+  point forward, rear knees backward (see KNEE_FLEX_SIGN).
+* A flat `floor` plane at z=0 (standalone viewing only; stripped by mjlab's get_spec()).
 * An `imu` site plus the sensors the velocity task expects are added
   (`imu_ang_vel`, `imu_lin_vel`, `imu_lin_acc`, `root_angmom`).
 * No actuators: mjlab adds them from `centaur_constants.py`.
@@ -49,6 +53,28 @@ Q_BASE = np.array([0.5, 0.5, 0.5, 0.5])
 # sits 2 cm above it (like the center of Go2's foot sphere).
 FOOT_SITE_POS = (0.0, -0.30, 0.001)
 FOOT_SITE_SIZE = 0.02
+
+# Sphere collider at the calf tip, centered on the foot site so its lowest point is at
+# the mesh tip (y ~= -0.32 in the calf frame).
+FOOT_SPHERE_RADIUS = 0.02
+CALF_MESH_COLLIDES = False
+
+# Base spawn height (m) in the standalone MJCF; keep in sync with INIT_STATE in
+# centaur_constants.py. A flat `floor` plane is added for standalone use; mjlab removes it
+# in get_spec() because training uses its own terrain.
+SPAWN_HEIGHT = 0.64
+
+# Horse-style knee directions, "<>" seen from the left (head on the left): front knees
+# point forward, rear knees point backward. Each calf joint may only flex one way from
+# straight (q=0). The joint axes are mirrored, so the sign of flexion depends on the leg:
+#   FL: +q swings the foot backward (knee forward)    FR: -q does the same
+#   RL: -q swings the foot forward  (knee backward)   RR: +q does the same
+# KNEE_HYPEREXT is a small allowance past straight. It keeps q=0 inside mjlab's soft limits
+# (soft_joint_pos_limit_factor=0.9 needs lower <= -upper/19), so standing straight is not
+# penalized, while any bend the wrong way is.
+KNEE_FLEX = 2.6
+KNEE_HYPEREXT = 0.15
+KNEE_FLEX_SIGN = {"FL": 1.0, "FR": -1.0, "RL": -1.0, "RR": 1.0}
 
 
 # ----------------------------------------------------------------------------- math
@@ -160,7 +186,10 @@ def build() -> ET.ElementTree:
 
   # ---- new free-floating base_link, x-forward / z-up
   new_wb = ET.Element("worldbody")
-  base = ET.SubElement(new_wb, "body", name="base_link", pos="0 0 0.6")
+  ET.SubElement(new_wb, "geom", name="floor", type="plane", size="5 5 0.05",
+                rgba="0.2 0.3 0.4 1", friction="1 0.005 0.0001",
+                contype="1", conaffinity="1", group="0")
+  base = ET.SubElement(new_wb, "body", name="base_link", pos=f"0 0 {SPAWN_HEIGHT}")
   ET.SubElement(base, "freejoint", name="floating_base_joint")
   R = quat_to_mat(Q_BASE)
 
@@ -204,8 +233,19 @@ def build() -> ET.ElementTree:
     coll = [g for g in calf.findall("geom") if g.get("class") == "collision"]
     assert len(coll) == 1, leg
     coll[0].set("name", f"{leg}_calf_collision")
+    if not CALF_MESH_COLLIDES:
+      calf.remove(coll[0])
+    ET.SubElement(calf, "geom", {"name": f"{leg}_foot_collision", "class": "collision",
+                                 "type": "sphere", "size": str(FOOT_SPHERE_RADIUS),
+                                 "pos": fmt(FOOT_SITE_POS)})
     ET.SubElement(calf, "site", {"name": leg, "pos": fmt(FOOT_SITE_POS),
                                  "size": str(FOOT_SITE_SIZE)})
+
+    # ---- one-way knee ("<>" config)
+    knee = calf.find("joint")
+    assert knee is not None and knee.get("name") == f"{leg}_3", leg
+    lo, hi = sorted((-KNEE_HYPEREXT * KNEE_FLEX_SIGN[leg], KNEE_FLEX * KNEE_FLEX_SIGN[leg]))
+    knee.set("range", fmt([lo, hi]))
 
   root.remove(wb)
   root.insert(list(root).index(asset) + 1, new_wb)

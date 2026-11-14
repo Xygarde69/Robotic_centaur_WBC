@@ -24,9 +24,9 @@ from centaur_rl.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 
 FOOT_NAMES = ("FR", "FL", "RR", "RL")
 SITE_NAMES = FOOT_NAMES
-GEOM_NAMES = FOOT_GEOM_NAMES  # calf meshes act as feet
+GEOM_NAMES = FOOT_GEOM_NAMES  # tip spheres act as feet
 
-# Nominal base-to-foot-site height is ~0.54 m; below this the robot has collapsed.
+# Nominal base-to-foot-site height is 0.60 m (straight legs); below this the robot has collapsed.
 MIN_BASE_HEIGHT = 0.30
 
 
@@ -70,20 +70,23 @@ def centaur_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg.events["foot_friction"].params["asset_cfg"].geom_names = GEOM_NAMES
   cfg.events["base_com"].params["asset_cfg"].body_names = ("base_link",)
 
+  # Knee std loosened (Go2: 0.15) so a slight knee flex is allowed when standing.
   cfg.rewards["pose"].params["std_standing"] = {
     r".*_1": 0.05,
     r".*_2": 0.1,
-    r".*_3": 0.15,
+    r".*_3": 0.3,
   }
+  # Knee stds are wider than Go2's: with a straight-leg default, every swing (0.15 m
+  # clearance needs ~1 rad of knee flexion) is a large one-sided deviation from default.
   cfg.rewards["pose"].params["std_walking"] = {
     r".*_1": 0.15,
     r".*_2": 0.35,
-    r".*_3": 0.5,
+    r".*_3": 0.8,
   }
   cfg.rewards["pose"].params["std_running"] = {
     r".*_1": 0.15,
-    r".*_2": 0.35,
-    r".*_3": 0.5,
+    r".*_2": 0.5,
+    r".*_3": 1.0,
   }
 
   # Trot: FR+RL in phase, FL+RR half a period later (order matches FOOT_NAMES).

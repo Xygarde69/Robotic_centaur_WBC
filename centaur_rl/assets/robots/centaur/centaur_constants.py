@@ -6,7 +6,7 @@ Frame: +x forward (torso end), +y left, z up. FR/RR are on the right (y < 0).
 Joints: <leg>_1 = hip ab/ad, <leg>_2 = thigh (hip pitch), <leg>_3 = calf (knee).
 Because the CAD axes are mirrored, pitch joints on the left (FL/RL) and right (FR/RR)
 have opposite signs for the same physical motion.
-Collision: only the calf meshes (<leg>_calf_collision) collide; they act as the feet.
+Collision: only a sphere at each calf tip (<leg>_foot_collision) collides; it acts as the foot.
 """
 
 from pathlib import Path
@@ -37,6 +37,10 @@ def get_assets(meshdir: str) -> dict[str, bytes]:
 
 def get_spec() -> mujoco.MjSpec:
   spec = mujoco.MjSpec.from_file(str(CENTAUR_XML))
+  # The MJCF carries a standalone floor; training uses mjlab's terrain instead.
+  floor = spec.geom("floor")
+  if floor is not None:
+    spec.delete(floor)
   spec.assets = get_assets(spec.meshdir)
   return spec
 
@@ -48,7 +52,7 @@ def get_spec() -> mujoco.MjSpec:
 # the ~58 kg welded-upper-body robot. Kept for the ~35.5 kg quadruped-only model too.
 ##
 
-EFFORT_LIMIT = 100.0
+EFFORT_LIMIT = 120.0  # Nm, motor peak torque
 
 CENTAUR_ACTUATOR_HIP = BuiltinPositionActuatorCfg(
   target_names_expr=(r"(FR|FL|RR|RL)_1",),
@@ -75,20 +79,24 @@ CENTAUR_ACTUATOR_CALF = BuiltinPositionActuatorCfg(
 ##
 # Keyframes.
 #
-# Knees-back stance (like Go2). FL/RL pitch axes are +y, FR/RR are -y, hence the sign flip.
+# Default stance: knees bent KNEE_BEND (30 deg, i.e. a 150 deg inner knee angle) in their
+# allowed direction, thighs rotated back by half of that so each foot stays directly
+# under its hip. Knees are one-way in the MJCF (horse-like "<>": front knees forward, rear
+# knees back), see KNEE_FLEX_SIGN in mjcf/build_train_xml.py; the per-leg signs below
+# match it. Thigh (_2) and calf (_3) share the same axis on each leg, so thigh = -knee/2.
+# In this pose each foot site is ~0.58 m below the base and the foot sphere (r=0.02)
+# touches the ground at base z~0.60; it spawns at 0.64 and drops ~4 cm.
 ##
 
-THIGH_ANGLE = 0.45
-CALF_ANGLE = -0.9
+KNEE_BEND = 0.5235988  # 30 deg
+KNEE_FLEX_SIGN = {"FL": 1.0, "FR": -1.0, "RL": -1.0, "RR": 1.0}
 
 INIT_STATE = EntityCfg.InitialStateCfg(
-  pos=(0.0, 0.0, 0.58),
+  pos=(0.0, 0.0, 0.64),
   joint_pos={
     r".*_1": 0.0,
-    r"(FL|RL)_2": THIGH_ANGLE,
-    r"(FL|RL)_3": CALF_ANGLE,
-    r"(FR|RR)_2": -THIGH_ANGLE,
-    r"(FR|RR)_3": -CALF_ANGLE,
+    **{f"{leg}_2": -0.5 * KNEE_BEND * s for leg, s in KNEE_FLEX_SIGN.items()},
+    **{f"{leg}_3": KNEE_BEND * s for leg, s in KNEE_FLEX_SIGN.items()},
   },
   joint_vel={".*": 0.0},
 )
@@ -97,11 +105,11 @@ INIT_STATE = EntityCfg.InitialStateCfg(
 # Collision config.
 ##
 
-FOOT_GEOM_NAMES = tuple(f"{leg}_calf_collision" for leg in LEG_NAMES)
+FOOT_GEOM_NAMES = tuple(f"{leg}_foot_collision" for leg in LEG_NAMES)
 
-# Calf meshes vs. terrain only (no self collisions). Nothing else in the model collides.
+# Foot spheres vs. terrain only (no self collisions). Nothing else in the model collides.
 CALF_ONLY_COLLISION = CollisionCfg(
-  geom_names_expr=(r"^(FR|FL|RR|RL)_calf_collision$",),
+  geom_names_expr=(r"^(FR|FL|RR|RL)_foot_collision$",),
   contype=1,
   conaffinity=0,
   condim=3,

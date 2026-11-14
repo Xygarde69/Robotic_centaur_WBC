@@ -1,0 +1,9 @@
+mjlab
+mujoco>=3.0
+numpy
+torch
+viser
+wandb
+tyro
+torchrunx
+prettytable

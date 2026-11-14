@@ -24,7 +24,7 @@ negative weight = penalty. "Active" means the command magnitude
 | `joint_pos_limits` | −10.0 | mjlab `joint_pos_limits` | |
 | `action_rate_l2` | −0.05 | mjlab `action_rate_l2` | |
 | `foot_gait` | +0.5 | `mdp.feet_gait` | period 0.6 s, stance threshold 0.56, trot offset `[0, 0.5, 0.5, 0]` |
-| `foot_clearance` | −1.0 | `mdp.feet_clearance` | target height 0.10 m |
+| `foot_clearance` | −1.0 | `mdp.feet_clearance` | target height 0.15 m |
 | `foot_slip` | −0.25 | `mdp.feet_slip` | sensor `feet_ground_contact` |
 | `soft_landing` | −1e-3 | `mdp.soft_landing` | sensor `feet_ground_contact` |
 | `stand_still` | −1.0 | `mdp.stand_still` | joints `.*` |
@@ -42,12 +42,14 @@ negative weight = penalty. "Active" means the command magnitude
   Weight is negative, so tilt is penalized.
 - **`pose`** (`variable_posture`) — `exp(-mean((q − q_default)² / std²))` with stds chosen by command speed
   (standing / walking / running). Tight when standing, loose when moving. Range (0, 1].
+  Default pose is all joints 0 (straight legs). Knee stds are wide because every swing is a
+  one-sided flexion away from straight (knees are one-way, horse-like `<>`).
 
   | Joint pattern | standing | walking | running |
   |---|---|---|---|
   | `.*_1` | 0.05 | 0.15 | 0.15 |
-  | `.*_2` | 0.10 | 0.35 | 0.35 |
-  | `.*_3` | 0.15 | 0.50 | 0.50 |
+  | `.*_2` | 0.10 | 0.35 | 0.50 |
+  | `.*_3` | 0.30 | 0.80 | 1.00 |
 - **`body_ang_vel`** — squared roll/pitch angular velocity of `base_link` (yaw excluded).
 - **`angular_momentum`** — squared magnitude of whole-body angular momentum.
 - **`stand_still`** — sum of squared joint deviation from default, applied only when the command is
@@ -56,7 +58,7 @@ negative weight = penalty. "Active" means the command magnitude
 ### Gait
 - **`foot_gait`** — fraction of feet whose contact state matches a periodic stance/swing schedule
   (per-foot phase offset; trot: FR+RL in phase, FL+RR half a period later). Only when active.
-- **`foot_clearance`** — `Σ |z_foot − 0.10| · ‖v_foot,xy‖`; penalizes feet moving fast at the wrong
+- **`foot_clearance`** — `Σ |z_foot − 0.15| · ‖v_foot,xy‖`; penalizes feet moving fast at the wrong
   height, encouraging a consistent swing height. Only when active.
 - **`foot_slip`** — `Σ ‖v_foot,xy‖²` over feet in contact. Only when active.
 - **`soft_landing`** — sum of contact-force magnitudes at the moment of first foot contact. Only when active.
@@ -77,3 +79,45 @@ These exist in `mdp/rewards.py` but are not in the reward config:
 The `*-SGS` tasks (`Centaur-Rough-SGS`) use the same reward set. SGS only changes what is sampled
 (terrain tile, spawn, command), not the rewards. Its separate "success" signal (timeout without
 failure, mean xy and yaw tracking error < 0.3) is used for sampling and is not a reward term.
+
+## Walking tasks (`Centaur-Walking-*`)
+`centaur_rl/tasks/walking/` starts from the reward set above and is tuned so the contact
+schedule in `centaur_rl/tasks/walking/mdp/gait.json` is the dominant objective. Everything below
+is derived from the gait file in `config/centaur/env_cfgs.py`, so swapping the JSON rescales it.
+
+Straight-line walking only: the command is `lin_x` in (0, v_max), `lin_y = ang_z = 0`, plus a
+gait cycle time as a 4th command entry (observed by the policy).
+
+| Item | Velocity task | Walking task (walk, gait.json shape, duty 0.524) |
+|---|---|---|
+| `foot_gait` | +0.5, `feet_gait` (phase offsets) | +1.5, `feet_gait_clock`: 0.5 · per-foot match + 0.5 · [all 4 match], walk clock, startup from rest |
+| `foot_contact_in_swing` | – | −0.5, fraction of feet on the ground while their clock says swing |
+| `foot_clearance` | −1.0, target 0.15 m | −0.3, target 0.13 m |
+| `body_orientation_l2` | −1.0, roll² + pitch² | −1.0, 0.3 · roll² + pitch² (`body_orientation_roll_pitch`) |
+| `body_ang_vel` | −0.05, world x/y rates | −0.05, body-frame 0.3 · roll rate² + pitch rate² |
+| command `lin_vel_x` | (−1, 2) | (0, min(2, v_max)) = (0, 1.687) |
+| command `lin_vel_y`, `ang_vel_z` | (−1, 1) | 0 |
+| command cycle time | – | [0.509, 1.66] s, feasible range for the speed (faster → shorter) |
+| `track_linear_velocity` std | 0.5 | 0.5 |
+| `track_angular_velocity` std | 0.707 | 0.25 (yaw command is always 0) |
+| `pose` hip ab/ad std (walking, running) | 0.15 | 0.4 |
+| `push_robot` velocities | ±0.5 m/s etc. | same (× min(1, 2·v_max)) |
+| SGS success thresholds (xy, yaw) | 0.3, 0.3 | 0.3, 0.2 |
+| SGS config | (tile, spawn, command) | command = (lin_x, 0, 0, cycle time) |
+| `phase` observation | sin/cos, 0.6 s period | `walk_phase`: sin/cos of the walk clock + first-cycle progress |
+
+- **Max walk speed** `v_max = sqrt(Fr · g · L)` with Froude number 0.5 (walk–trot transition)
+  and leg length L = 0.58 m → 1.687 m/s.
+- **Cycle time.** A planted foot sweeps `v · duty · T` under its hip; that stride is kept in
+  [0.15, 0.45] m, so `T ∈ [0.15 / (duty·v), 0.45 / (duty·v)]` clipped to [0.509, 1.66] s.
+  0.509 s is the cycle that reaches v_max with a full 0.45 m stride (0.24 s swing); 1.66 s is
+  gait.json's own cycle. The 1.66 s cycle is allowed from 0.17 to 0.52 m/s and forced below 0.17 m/s, where strides drop under 0.15 m. All gait.json timings
+  scale with T (shape and duty factor are fixed).
+- **Gait clock** (`WalkVelocityCommand`): counts cycles since walking started, zero while
+  standing, restarted at every episode reset and standing → walking switch.
+- **`foot_gait`** (`feet_gait_clock`): as the trot, the fraction of feet whose contact matches
+  their clock; stance while `(cycles + offset) % 1 < duty`. From rest each leg stays down
+  until its first lift-off (FR 0, RL 0.25, FL 0.5, RR 0.75 of a cycle), so the walk starts with
+  FR's long stride exactly as gait.json P0; afterwards P8 ≡ P0. Zero while standing.
+- Offsets and lift phases are given in `LEG_NAMES` order and permuted to the contact sensor's
+  foot order (model order FL, FR, RL, RR) by `feet_gait_clock`.
