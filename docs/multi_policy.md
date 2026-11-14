@@ -47,26 +47,31 @@ handoff is disabled. The paths are written to `pipeline.json` → `deployed_poli
 | walk | 0–1.30 (SGS from 0.15) | .476, .976, .226, .726 (lateral sequence, footfalls 0.25 apart) / 0.79 → 0.57 with speed | at rest |
 | trot | 1.20–2.80 | 0, .5, .5, 0 (diagonal pairs) / 0.47 → 0.39 with speed | moving at the command |
 | canter | 2.24–6.00 | 0.60, .32, .33, 0 (right lead: RL, FL → RR, FR) / 0.38 → 0.32 with speed | moving |
-| gallop | 4.47–8.00 (top end is a placeholder) | .57, .45, .12, 0 / 0.28 | moving |
+| gallop | 4.47–8.00 (top end is a placeholder) | .50, .345, .17, 0 (right lead: RL, RR, FL, FR, one flight) / fore 0.30 → 0.20, hind 0.33 → 0.23 | moving |
 
 Walk/trot, trot/canter and canter/gallop all overlap (`check_gait_chain`). The walk tops out at Froude 0.30
 and the trot starts at 0.25, where horses change gait (Robilliard et al. 2007, 187.pdf).
 
-Stride frequency rises with speed: `f(v) = clamp(v · duty / stance_sweep, f_min, f_max)` for the
-gallop. The walk uses `f(v) = clamp(0.7 + 0.95 v, 0.6, 1.7)` Hz (strides lengthen faster than they quicken, as in
+Stride frequency rises with speed. The walk uses `f(v) = clamp(0.7 + 0.95 v, 0.6, 1.7)` Hz (strides lengthen faster than they quicken, as in
 horses), and its duty factor follows the frequency with a fixed air time per foot:
 `duty = clamp(1 − 0.25 s · f, 0.55, 0.80)` (0.79 at 0.15 m/s, 0.57 at 1.3 m/s, always 2–3 feet down). Set per gait
 by `GaitClock.air_time` and `StrideFrequency.slope/offset`; `gait_duty` is the per-env duty, so the observation
 layout is unchanged. The trot does the same with `f = 2.0 + 0.19 v` (2.0–3.0 Hz) and `duty = clamp(1 − 0.24 s · f,
 0.35, 0.50)` (0.47 at 1.2 m/s, 0.39 at 2.8 m/s). The canter uses `f = 2.04 + 0.25 v` (2.60–3.54 Hz) and
-`duty = clamp(1 − 0.20 s · f, 0.32, 0.38)`.
+`duty = clamp(1 − 0.20 s · f, 0.32, 0.38)`. The gallop uses `f = 2.54 + 0.127 v` (3.11–3.56 Hz) and a
+per-leg air time (fore 0.225 s, hind 0.217 s), so fore and hind duty differ; `gait_duty` shows their mean.
 
 Fixed for every gait, because changing any of these invalidates every checkpoint:
 - the observation layout
 - action scale 0.5
 - kp 150 / kd 5
 - torque limit 400 Nm (sim only)
-- 50 Hz control
+
+Control rate is per gait (`GaitSpec.decimation`, physics 0.005 s): 50 Hz for walk, trot and canter, **100 Hz for
+the gallop** (its 60–100 ms stances are only 3–5 steps at 50 Hz). The PPO discount, GAE λ and rollout length are
+rescaled so their horizons stay the same in seconds (`rl/cfg.py`): γ 0.99 → 0.995, λ 0.95 → 0.975, 24 → 48 steps
+per env at 100 Hz. The gallop forks from the 50 Hz canter: the observation layout is identical, but the policy
+now acts every 10 ms, which the critic warmup and std floor have to absorb.
 
 ## Observations
 
@@ -96,7 +101,7 @@ The critic gets all of the above plus:
 - action rate, joint acceleration, joint limits, torque
 - foot slip
 
-Each gait's own design goes in `rewards/<gait>.py`. The gallop is still a placeholder.
+Each gait's own design goes in `rewards/<gait>.py`.
 
 ### Walk (`rewards/walk.py`)
 
@@ -262,6 +267,93 @@ Open points:
   it only if the gait comes out symmetric once the timing terms work.
 - Not tuned: these weights are first values from the trot and the horse data; nothing has been trained with them.
 
+
+### Gallop (`rewards/gallop.py`)
+
+Starts from the canter's term set and changes what the gallop does differently. It replaces `common_rewards`.
+Horse references: Witte, Hirst & Wilson 2006 (`4389.pdf`, stride timing of 9 Thoroughbreds at 9–17 m/s, 5642
+strides) and Self Davies, Spence & Wilson 2019 (`12348_Ground-reaction-forces-...pdf`, force plates under 7
+galloping Thoroughbreds at 9–14 m/s). The clock is `gaits.GALLOP`. Runs at **100 Hz**.
+
+| Term | Weight (100 Hz) | Function | Notes vs the canter |
+|---|---|---|---|
+| `track_linear_velocity` | +1.0 | `track_linear_velocity` | std 1.0, width max(1.0, 0.2·v_cmd), z weight **0.2** (canter 0.3) |
+| `track_angular_velocity` | +1.0 | `track_angular_velocity` | same |
+| `foot_gait` | +0.5 | `gait_contact_schedule` | same (per-leg duty now) |
+| `touchdown_timing` | +4.0 (2.0 × 2) | `touchdown_timing` | std **0.05** cycle ≈ 1.5 steps at 100 Hz |
+| `footfall_sequence` | +1.0 (0.5 × 2) | `footfall_sequence` | **new.** 1 at the FR touchdown when RL < RR < FL < FR landed in that strict order within the stride. Replaces `diagonal_order` |
+| `excess_contact` | −0.3 | `feet_excess_contact` | `max_feet=2` (canter 3) |
+| `foot_suspension` | +1.0 | `feet_suspension` | canter 0.5: the flight is ~7–8 steps now, not < 1 |
+| `unscheduled_flight` | −1.0 | `unscheduled_flight` | **new.** 1 while all feet are up outside the clock's flight window |
+| `flight_duration` | +1.0 (0.5 × 2) | `flight_duration` | **new.** At the RL touchdown that ends a flight: exp(−((t − t_sched)/0.025 s)²) |
+| `grf_peak_excess` | −0.5 | `grf_peak_excess` | **new**, replaces `soft_landing`. Σ relu(Fz_peak / Fz_pred − 1.3)² |
+| `vertical_impulse_balance` | +0.6 (0.3 × 2) | `vertical_impulse_balance` | **new.** Per stride, exp(−((fore share − target)/0.05)²) |
+| `propulsion_split` | −0.4 (0.2 × 2) | `propulsion_split` | **new.** Per stride, (relu(−Ix_hind) + relu(Ix_fore)) / (m g T) |
+| `body_orientation_l2` | −1.0 | `body_orientation_roll_pitch` | roll 1.0, pitch **0.1** (canter 0.2) |
+| `body_ang_vel` | −0.05 | `body_angular_velocity_roll_pitch` | roll 1.0, pitch **0.1** |
+| `angular_momentum` | −0.025 | `angular_momentum_penalty` | same |
+| `pose` | +1.0 | `variable_posture` | same |
+| `foot_clearance` | −1.5 | `feet_clearance` | same 0.16 m (neither paper has swing height) |
+| `foot_slip` | −0.25 | `feet_slip` | same |
+| `is_terminated` | −400 (−200 × 2) | mjlab | same per termination |
+| `joint_acc_l2`, `joint_pos_limits`, `torque_l2` | −2.5e-7, −10, −1e-5 | mjlab | same |
+| `action_rate_l2` | −0.4 (−0.1 × 4) | mjlab | = −0.1 at 50 Hz, half the canter's: stances need fast joint motion |
+
+**Weights at 100 Hz.** mjlab pays `weight · term · dt`. Dense terms are per second and keep their weights. Sparse
+once-per-event terms (touchdowns, strides, terminations) would be worth half as much per event at 100 Hz, so their
+weights are ×2 (`REFERENCE_DT / control_dt`, written as `w * event` in the module). `action_rate_l2` is a squared
+per-step difference: for the same smooth motion it is 4× smaller per step, so its weight is ×4.
+
+#### Horse-data basis
+
+Scaling: Froude similarity with a 1.5 m horse leg (Witte's estimate) against 0.58 m here. Speeds and frequencies
+×√(1.5/0.58) ≈ 1.61, times ×0.62. 4.47–8 m/s here is a horse at ~7.2–12.9 m/s. Horse fits below are Witte's
+quadratic population fits (Figs 3–9) or Self Davies' linear fits (Figs 2–3), with v the horse speed.
+
+| | Horse | Robot clock, 4.47 → 8 m/s |
+|---|---|---|
+| Stride frequency | 2.02 → 2.41 Hz over 9–17 m/s | `f = 2.54 + 0.127 v` = 3.11 → 3.56 Hz (canter 3.16 Hz at 4.47: continuous handoff) |
+| Swing (protraction) | fore 364 → 342 ms, hind 355 → 326 ms | air time fore 0.225 s, hind 0.217 s |
+| Duty | fore 0.27 → 0.18, hind 0.29 → 0.22 (hind always longer) | fore 0.30 → 0.20, hind 0.33 → 0.23 |
+| Flight | ~27% of the stride at every speed, 135 → 119 ms, never two per stride | one flight, 64 → 84 ms (horse ×0.62: 84 → 74 ms) |
+| Overlap between footfalls | 183 → 35 ms in total, falls toward 0 | 50 → 15 ms per transition, always > 0, ≤ 2 feet down |
+| Stance length | fore 1.18 → 1.31 m, hind 1.28 → 1.58 m (sweep 23–32°) | v·duty/f: fore 0.43 → 0.45 m, hind 0.47 → 0.51 m |
+| Fore share of vertical impulse | 49:51 mean; hind % = 36.8 + 1.215 v | 0.632 − 0.0195 v = 0.545 → 0.476 (robot standing: 0.58) |
+| Peak vertical GRF | 1.0–1.7 BW; duty-factor prediction = 100% of recorded (middle half 90–107%) | prediction π P m g / (4 duty): 1.4 → 1.9 BW fore, 1.1 → 1.8 BW hind |
+| Fore-aft impulse | hind net +0.08 / +0.04, fore 0 / −0.03 N s/kg | hind ≥ 0, fore ≤ 0 |
+| Lead vs non-lead | no significant timing difference | identical clock within each pair |
+
+- **The previous placeholder clock had two flights** (RR lifted at 0.40, FL landed at 0.45) and a 0.15-cycle main
+  flight. Its frequency `f = v · 0.28 / 0.5` was 2.5 Hz at 4.47 m/s (below the canter) and hit the 4 Hz cap by
+  7.1 m/s, so speed came from cadence instead of stride length. Replaced.
+- **Clock checked numerically** (2000-sample grid, 4.47 → 8 m/s): exactly one flight segment, at most 2 feet
+  down, all three footfall overlaps positive. With FR at 0.49 there were 3 feet down for 2 ms at 4.47 m/s, hence 0.50.
+- **Why `footfall_sequence` and not `diagonal_order`.** `diagonal_order` asks the partner foot to still be
+  down. At 8 m/s FL lifts ~13 ms before FR lands, which is correct, so it would fire wrongly. The sequence test
+  uses touchdown times instead and is strict (two feet on one step fail it).
+- **Force terms.** The foot contact sensor (`netforce`, world frame) reports z < 0, the force on the ground. The
+  terms flip the sign from z and integrate every physics substep (`history_length = decimation`). Standing, the
+  summed GRF is 1.000 × body weight. Strides run from one RL touchdown to the next; partial strides
+  (first after reset, or outside 0.5–1.5 cycles) are skipped. Fore-aft is in the heading (yaw) frame.
+- **Verified on a synthetic perfect gallop** (feet on the clock, half-sine GRFs): `footfall_sequence` 1 every
+  stride; `flight_duration` 75 ms against a 74 ms target; measured fore share = injected; stride impulse
+  0.999 BW; no penalties. With canter order the sequence term pays 0. With reversed push/brake
+  `propulsion_split` costs 0.157 per stride. With 2× forces `grf_peak_excess` fires.
+
+New metrics: `flight_time_ms` / `flight_target_ms`, `footfall_sequence_ok`, `unscheduled_flight`,
+`fore_impulse_share` / `fore_impulse_target`, `stride_impulse_bw` (should be ~1), `hind_net_impulse_x` /
+`fore_net_impulse_x` (N s/kg), `grf_peak_bw`, `grf_peak_over_pred` (mean over loaded foot-steps; a perfect
+half-sine reads ~0.7).
+
+Open points:
+- Right lead only. A mirrored clock in refine would give a left lead. The per-leg sin/cos clock already shows
+  which lead is active, so the obs layout would not change. But the canter (and its handoff banks) is
+  right-lead, and the success test's stride metric is FL-to-FL.
+- Not tuned: first values. Nothing has been trained with them.
+- 400 Nm sim limit: ~600 N peak foot force is fine there, probably not with the real 120 Nm motors. Watch
+  `Metrics/peak_torque`.
+- The 50 Hz canter → 100 Hz gallop fork is untested. If the forked actor collapses, try more critic warmup
+  iterations or a higher std floor for the gallop fork.
 
 ## Metrics (logged, never rewarded)
 

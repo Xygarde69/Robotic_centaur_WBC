@@ -40,7 +40,18 @@ class MultiGaitRunnerCfg(RslRlOnPolicyRunnerCfg):
   stage: MultiGaitStageCfg = field(default_factory=MultiGaitStageCfg)
 
 
-def multigait_ppo_cfg(experiment_name: str, max_iterations: int) -> MultiGaitRunnerCfg:
+# Values for a 50 Hz policy. Other control rates keep the same horizons in SECONDS:
+# gamma 0.99 = a 2 s discount horizon, lambda 0.95 = 0.4 s, 24 steps = 0.48 s rollouts.
+REFERENCE_DT = 0.02
+GAMMA = 0.99
+LAM = 0.95
+NUM_STEPS_PER_ENV = 24
+
+
+def multigait_ppo_cfg(
+  experiment_name: str, max_iterations: int, control_dt: float = REFERENCE_DT
+) -> MultiGaitRunnerCfg:
+  k = control_dt / REFERENCE_DT  # 0.5 at 100 Hz
   return MultiGaitRunnerCfg(
     actor=RslRlModelCfg(
       hidden_dims=(512, 256, 128),
@@ -58,14 +69,14 @@ def multigait_ppo_cfg(experiment_name: str, max_iterations: int) -> MultiGaitRun
       num_mini_batches=4,
       learning_rate=1.0e-3,
       schedule="adaptive",
-      gamma=0.99,
-      lam=0.95,
+      gamma=GAMMA**k,  # 0.995 at 100 Hz
+      lam=LAM**k,  # 0.975 at 100 Hz
       desired_kl=0.01,
       max_grad_norm=1.0,
     ),
     experiment_name=experiment_name,
     logger="tensorboard",
     save_interval=100,
-    num_steps_per_env=24,
+    num_steps_per_env=round(NUM_STEPS_PER_ENV / k),  # 48 at 100 Hz
     max_iterations=max_iterations,
   )

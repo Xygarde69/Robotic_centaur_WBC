@@ -10,7 +10,11 @@ make_env_cfg(spec, phase) is the only factory; every stage task is registered fr
          handoff  as refine, but a large share of resets start from handoff banks
 
 What NEVER differs (each gait starts from the previous gait's weights): observation
-layout, action space, action scale, PD gains, torque limit, control rate.
+layout, action space, action scale, PD gains, torque limit. The control rate is per gait
+(GaitSpec.decimation): 50 Hz for walk/trot/canter, 100 Hz for the gallop, whose 60-100 ms
+stances are only 3-5 steps at 50 Hz. The gallop forks from the 50 Hz canter: the obs
+layout is identical, but the policy now acts every 10 ms (critic warmup + std floor
+absorb the change).
 """
 
 from __future__ import annotations
@@ -37,7 +41,7 @@ from mjlab.viewer import ViewerConfig
 from centaur_rl.assets.robots import get_centaur_robot_cfg
 from centaur_rl.assets.robots.centaur.centaur_constants import FOOT_GEOM_NAMES, LEG_NAMES
 from centaur_rl.tasks.Multi_Policy import mdp
-from centaur_rl.tasks.Multi_Policy.gaits import NUM_GAITS, GaitSpec
+from centaur_rl.tasks.Multi_Policy.gaits import NUM_GAITS, SIM_DT, GaitSpec
 from centaur_rl.tasks.Multi_Policy.rewards import build_rewards
 from centaur_rl.tasks.Multi_Policy.rewards.common import COMMAND, CONTACT_SENSOR, FOOT_SITES
 
@@ -233,6 +237,9 @@ def make_env_cfg(spec: GaitSpec, phase: str = "ladder", play: bool = False) -> M
     reduce="netforce",
     num_slots=1,
     track_air_time=True,
+    # Every physics substep of the last policy step: the gallop's impulse / peak-force
+    # terms integrate it (stance is only a few policy steps long).
+    history_length=spec.decimation,
   )
   cfg = ManagerBasedRlEnvCfg(
     scene=SceneCfg(
@@ -266,9 +273,9 @@ def make_env_cfg(spec: GaitSpec, phase: str = "ladder", play: bool = False) -> M
       nconmax=None,
       njmax=300,
       contact_sensor_maxmatch=64,
-      mujoco=MujocoCfg(timestep=0.005, iterations=10, ls_iterations=20, ccd_iterations=50),
+      mujoco=MujocoCfg(timestep=SIM_DT, iterations=10, ls_iterations=20, ccd_iterations=50),
     ),
-    decimation=4,
+    decimation=spec.decimation,
     episode_length_s=EPISODE_LENGTH_S,
   )
   assert len(LEG_NAMES) == len(FOOT_SITES)

@@ -26,7 +26,9 @@ for _gait in GAITS:
       task_id=stage_task_id(_gait, _phase),
       env_cfg=make_env_cfg(_gait, _phase),
       play_env_cfg=make_env_cfg(_gait, _phase, play=True),
-      rl_cfg=multigait_ppo_cfg(f"{EXPERIMENT_ROOT}/{_gait.name}-{_phase}", _ITERS[_phase](_gait)),
+      rl_cfg=multigait_ppo_cfg(
+        f"{EXPERIMENT_ROOT}/{_gait.name}-{_phase}", _ITERS[_phase](_gait), _gait.control_dt
+      ),
       runner_cls=MultiGaitRunner,
     )
 

@@ -6,7 +6,8 @@ change between stages, since each gait starts from the previous gait's weights):
   gait_clock     [8]  sin/cos of each leg's phase
   gait_onehot    [4]  which gait (NUM_GAITS wide, fixed). Constant within a policy, kept
                       so the four policies can later be distilled into one.
-  gait_duty      [1]  duty factor of the gait's clock
+  gait_duty      [1]  duty factor of the gait's clock (mean over legs: the gallop's
+                      fore and hind duties differ)
 Critic only:
   gait_stance    [4]  scheduled stance per foot (next step)
 """
@@ -47,8 +48,7 @@ def gait_onehot(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
 
 
 def gait_duty(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
-  t = _term(env, command_name)
-  return t.duty.unsqueeze(1)
+  return _term(env, command_name).mean_duty().unsqueeze(1)
 
 
 def gait_stance(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:

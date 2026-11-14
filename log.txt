@@ -473,3 +473,47 @@ C. Known issues / open
    patterns per gait; spawn speed = command; ladder advance logic; fork keeps the actor
    bit-identical through critic warmup and trains it after; full 18-job pipeline ran end
    to end (3-iteration stages, 64 envs) including fail -> --resume. Not trained yet.
+
+
+[2026-11-14] GALLOP REWARDS + CLOCK, 100 Hz GALLOP - centaur_rl/tasks/Multi_Policy
+----------------------------------------------------------------------------------
+User request: design the gallop rewards from the two horse papers in the project root
+(Witte, Hirst & Wilson 2006, 4389.pdf; Self Davies, Spence & Wilson 2019,
+12348_Ground-reaction-forces-...pdf), implement them, and run the gallop at 100 Hz.
+Doc: docs/multi_policy.md (Gallop section). Other gaits unchanged.
+
+A. Clock (gaits.GALLOP), from the horse data scaled by Froude (1.5 m horse leg)
+   - touchdown (FR .50, FL .345, RR .17, RL 0): one flight per stride (64 -> 84 ms),
+     every consecutive footfall pair overlaps, <= 2 feet down. The old placeholder
+     (.57/.45/.12/0, duty .28) had a second flight between RR lift-off and FL touchdown,
+     which horses never show.
+   - per-leg air time fore 0.225 s / hind 0.217 s (horse swing near-constant, hind
+     stance longer): duty fore 0.30 -> 0.20, hind 0.33 -> 0.23.
+   - f = 2.54 + 0.127 v (3.11 -> 3.56 Hz): horse frequency rises only ~20%; the old
+     v*duty/sweep model gave 2.5 Hz at 4.47 (below the canter) and hit 4 Hz by 7.1 m/s.
+   - success_timing_tol 0.10, decimation 2 (100 Hz).
+
+B. Infrastructure
+   - GaitClock.air_time may be a per-leg 4-tuple; GaitCommand.duty is [B, feet];
+     gait_duty observation = mean over legs (layout unchanged, 57/88).
+   - GaitSpec.decimation / control_dt (SIM_DT 0.005); env decimation and the foot
+     sensor's history_length follow it. PPO gamma/lambda/num_steps_per_env rescaled to
+     keep horizons in seconds (gallop: 0.995 / 0.975 / 48).
+   - Sparse per-event reward weights x (0.02 / control_dt), action_rate x that squared,
+     because mjlab pays weight * term * dt.
+
+C. New reward functions (mdp/rewards.py), used by rewards/gallop.py
+   footfall_sequence (strict RL<RR<FL<FR per stride), unscheduled_flight, flight_duration,
+   grf_peak_excess (duty-factor half-sine prediction x1.3, replaces soft_landing),
+   vertical_impulse_balance (fore share 0.632 - 0.0195 v), propulsion_split (hind push,
+   fore brake). Sensor reports force on the ground (z < 0); terms flip it by z sign.
+
+D. Checked
+   all 8 walk/trot/canter/gallop ladder/refine envs build and step; standing GRF sum =
+   1.000 BW; synthetic perfect gallop -> sequence 1/stride, flight 75 vs 74 ms target,
+   impulse share = injected, stride impulse 0.999 BW, no penalties; canter order /
+   reversed push-brake / 2x force spikes each caught; 5 PPO iterations of
+   Gallop-Ladder at 100 Hz run (256 envs). Not trained.
+
+E. Open
+   right lead only; weights untuned; 50 Hz canter -> 100 Hz gallop fork untested.

@@ -7,7 +7,8 @@ observation and metric that needs the schedule):
   cycles  gait cycles since the episode started, integrated from the stride frequency
           f(v_cmd) (gaits.StrideFrequency), so a speed change changes the clock rate,
           never its phase.
-  stance  leg i is scheduled on the ground while ((cycles + offset_i) mod 1) < duty.
+  stance  leg i is scheduled on the ground while ((cycles + offset_i) mod 1) < duty_i
+          (duty is per leg: equal for every leg unless the gait's air_time is per leg).
 
 Speeds per episode come from SGS when it is active (env.sgs), otherwise uniformly from
 the gait's range (play, handoff recording). The reset event (spawning the robot already
@@ -54,7 +55,12 @@ class GaitCommand(CommandTerm):
 
     self.vel_command_b = torch.zeros(n, 3, device=dev)
     self.stride_freq = torch.full((n,), cfg.f_min, device=dev)
-    self.duty = torch.full((n,), cfg.duty_factor, device=dev)  # follows the speed (air_time)
+    # [B, feet] per-leg duty (sensor order), follows the speed when air_time is set.
+    self.duty = torch.full((n, self.num_feet), cfg.duty_factor, device=dev)
+    self._air_time = None
+    if cfg.air_time is not None:
+      air = cfg.air_time if isinstance(cfg.air_time, tuple) else (cfg.air_time,) * self.num_feet
+      self._air_time = torch.tensor(air, device=dev)[perm].view(1, -1)
     self.gait_cycles = torch.zeros(n, device=dev)
     self.gait_onehot = torch.zeros(n, cfg.num_gaits, device=dev)
     self.gait_onehot[:, cfg.gait_index] = 1.0
@@ -107,10 +113,22 @@ class GaitCommand(CommandTerm):
     return f.clamp(c.f_min, c.f_max)
 
   def duty_of(self, f: torch.Tensor) -> torch.Tensor:
+    """[B] stride frequencies -> [B, feet] per-leg duty factors."""
     c = self.cfg
-    if c.air_time is None:
-      return torch.full_like(f, c.duty_factor)
-    return (1.0 - c.air_time * f).clamp(c.duty_min, c.duty_max)
+    if self._air_time is None:
+      return torch.full((f.shape[0], self.num_feet), c.duty_factor, device=f.device)
+    return (1.0 - self._air_time * f.unsqueeze(1)).clamp(c.duty_min, c.duty_max)
+
+  def mean_duty(self) -> torch.Tensor:
+    """[B] duty averaged over the legs (the 1-wide gait_duty observation)."""
+    return self.duty.mean(dim=1)
+
+  def scheduled_flight_fraction(self, samples: int = 100) -> torch.Tensor:
+    """[B] share of the cycle in which the clock schedules no foot in stance."""
+    grid = (torch.arange(samples, device=self.device) + 0.5) / samples  # [G]
+    phase = (grid.view(1, -1, 1) + self.offsets.unsqueeze(1)) % 1.0  # [1, G, feet]
+    stance = phase < self.duty.unsqueeze(1)  # [B, G, feet]
+    return (~stance.any(dim=2)).float().mean(dim=1)
 
   def cycles_at(self, lookahead_steps: int = 0) -> torch.Tensor:
     """[B] gait cycles, advanced by lookahead_steps control steps (only while moving)."""
@@ -131,7 +149,7 @@ class GaitCommand(CommandTerm):
     In an episode started from rest every foot is held down until its first lift-off
     (startup hold), so the gait begins one leg at a time instead of with two feet
     snatched off the ground at t = 0."""
-    duty = self.duty.unsqueeze(1)
+    duty = self.duty
     stance = self.leg_phase(lookahead_steps) < duty
     # First lift-off of each leg, in cycles: when its phase reaches the duty factor.
     first = (duty - self.offsets) % 1.0
@@ -270,8 +288,9 @@ class GaitCommandCfg(CommandTermCfg):
   foot_geoms: tuple[str, ...]
   offsets: tuple[float, ...]
   duty_factor: float
-  # Duty factor follows the stride frequency when air_time is set (see GaitClock).
-  air_time: float | None = None
+  # Duty factor follows the stride frequency when air_time is set (see GaitClock); a
+  # tuple is one air time per leg (LEG order, matching foot_geoms).
+  air_time: float | tuple[float, ...] | None = None
   duty_min: float = 0.0
   duty_max: float = 1.0
   # Stride frequency f(v) = clamp(v * duty / stance_sweep, f_min, f_max), or

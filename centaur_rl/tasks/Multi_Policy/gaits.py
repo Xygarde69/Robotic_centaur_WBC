@@ -25,6 +25,13 @@ assert LEG_NAMES == ("FR", "FL", "RR", "RL"), "touchdown tables below assume thi
 # Leg length (hip to foot in the default stance); used only for Froude-number notes.
 LEG_LENGTH = 0.58
 
+# Physics timestep (s). The control step is GaitSpec.decimation of these.
+SIM_DT = 0.005
+# Control step the reward weights were first written for (50 Hz). Sparse once-per-event
+# terms are paid weight * control_dt per event (mjlab scales rewards by dt), so a gait at
+# another rate multiplies their weights by REFERENCE_DT / control_dt to keep them the same.
+REFERENCE_DT = 0.02
+
 
 def froude(v: float) -> float:
   return v * v / (9.81 * LEG_LENGTH)
@@ -39,18 +46,34 @@ class GaitClock:
   duty_factor: float
   """Fraction of the cycle each foot is on the ground. < 0.5 for every leg => flight.
   With `air_time` set this is only the nominal value (used for the first guess)."""
-  air_time: float | None = None
+  air_time: float | tuple[float, float, float, float] | None = None
   """If set, the time each foot spends in the air is held at this many seconds at every
   speed and the duty factor follows the stride frequency: duty = 1 - air_time * f,
   clamped to [duty_min, duty_max]. This is what horses do (Robilliard et al. 2007: swing
-  time hardly changes with speed, stance time shrinks)."""
+  time hardly changes with speed, stance time shrinks). A 4-tuple (LEG_NAMES order) gives
+  each leg its own air time, hence its own duty factor (the gallop: hind stance is longer
+  than fore stance, Witte et al. 2006)."""
   duty_min: float = 0.0
   duty_max: float = 1.0
 
+  @property
+  def leg_air_times(self) -> tuple[float, float, float, float] | None:
+    if self.air_time is None or isinstance(self.air_time, tuple):
+      return self.air_time
+    return (self.air_time,) * 4
+
+  def leg_duties_at(self, frequency: float) -> tuple[float, ...]:
+    """Per-leg duty factor (LEG_NAMES order) at this stride frequency."""
+    air = self.leg_air_times
+    if air is None:
+      return (self.duty_factor,) * 4
+    return tuple(min(max(1.0 - a * frequency, self.duty_min), self.duty_max) for a in air)
+
   def duty_at(self, frequency: float) -> float:
-    if self.air_time is None:
-      return self.duty_factor
-    return min(max(1.0 - self.air_time * frequency, self.duty_min), self.duty_max)
+    """Mean duty over the legs (= every leg's duty unless air_time is per leg). This is
+    what the 1-wide `gait_duty` observation shows."""
+    d = self.leg_duties_at(frequency)
+    return sum(d) / len(d)
 
   @property
   def offsets(self) -> tuple[float, ...]:
@@ -135,13 +158,22 @@ class GaitSpec:
   success_timing_tol: float | None = None
   settle_time: float = 1.0
 
-  # Terminations. PLACEHOLDERS: tune per gait when designing rewards (gallop pitches a
-  # lot and has flight phases; walk-level limits would kill good gallop episodes).
+  # Terminations. Tune per gait when designing rewards (gallop pitches a lot and has
+  # flight phases; walk-level limits would kill good gallop episodes).
   max_tilt_deg: float = 60.0
   min_base_height: float = 0.30
 
   tracking_std: float = 0.5  # m/s, lin-vel tracking kernel width (placeholder)
   budget: StageBudget = field(default_factory=StageBudget)
+
+  # Control rate: physics substeps (SIM_DT each) per policy step. 4 = 50 Hz. The PPO
+  # discount, GAE lambda and rollout length are rescaled from it (rl/cfg.py) so their
+  # horizons in seconds stay the same at every rate.
+  decimation: int = 4
+
+  @property
+  def control_dt(self) -> float:
+    return self.decimation * SIM_DT
 
   @property
   def v_min(self) -> float:
@@ -268,13 +300,41 @@ GALLOP = GaitSpec(
   # "4.47 onwards": the top end is OPEN in the spec. 8 m/s (Froude ~11) is a
   # placeholder ceiling for the ladder; raise it if the policy saturates.
   speed_range=(4.47, 8.00),
-  # Right-lead transverse 4-beat: RL, RR, FL, FR.
-  clock=GaitClock(touchdown=(0.57, 0.45, 0.12, 0.0), duty_factor=0.28),
-  stride=StrideFrequency(stance_sweep=0.50, f_min=1.8, f_max=4.0),
+  # Right-lead transverse 4-beat: RL (non-lead hind), RR (lead hind), FL (non-lead fore),
+  # FR (lead fore), then ONE flight. From Witte, Hirst & Wilson 2006 (4389.pdf, 9-17 m/s
+  # Thoroughbreds) scaled by Froude similarity with a 1.5 m horse leg: speeds and
+  # frequencies x sqrt(1.5 / 0.58) = 1.61, times x 0.62, so 4.47-8 m/s here is a horse
+  # galloping at ~7.2-12.9 m/s. See docs/multi_policy.md (Gallop) for the derivation.
+  #   - Swing time is nearly constant (fore 364 -> 342 ms, hind 355 -> 326 ms), hind
+  #     stance is always longer than fore: per-leg air time fore 0.225 s, hind 0.217 s, so
+  #     duty fore 0.30 -> 0.20, hind 0.33 -> 0.23 (horse fits 0.28 -> 0.21, 0.32 -> 0.24).
+  #   - Every consecutive pair of footfalls overlaps (no double suspension in 5642
+  #     strides) and the single flight is ~27% of the stride. Touchdowns chosen so the
+  #     three footfall overlaps stay > 0 over the whole range (50 ms each at 4.47 m/s ->
+  #     ~15 ms at 8 m/s; horse total 183 -> 35 ms), one flight of 64 ms at 4.47 m/s ->
+  #     84 ms at 8 m/s (horse 135 -> 119 ms x 0.62 = 84 -> 74 ms), at most 2 feet down.
+  #   (The previous placeholder, touchdowns .57/.45/.12/0 with duty 0.28, had a second
+  #   flight between RR lift-off at 0.40 and FL touchdown at 0.45.)
+  clock=GaitClock(
+    touchdown=(0.50, 0.345, 0.17, 0.0),
+    duty_factor=0.26,
+    air_time=(0.225, 0.225, 0.217, 0.217),
+    duty_min=0.19,
+    duty_max=0.33,
+  ),
+  # Horse stride frequency rises only 2.02 -> 2.41 Hz over 9-17 m/s (speed comes mostly
+  # from stride length): f_h ~ 1.58 + 0.049 v_h, scaled: f = 2.54 + 0.127 v = 3.11 Hz at
+  # 4.47 m/s (canter 3.16 Hz there: continuous handoff) -> 3.56 Hz at 8 m/s.
+  stride=StrideFrequency(stance_sweep=0.50, f_min=3.0, f_max=3.8, slope=0.127, offset=2.54),
   speed_bins=14,
   max_tilt_deg=75.0,
   min_base_height=0.25,
   tracking_std=1.0,
+  # Stance is 60-100 ms: 3-5 steps at 50 Hz, and the top-speed footfall overlap is ~16 ms.
+  # 100 Hz control (decimation 2) for now.
+  decimation=2,
+  # One 100 Hz step is 0.031-0.036 of a cycle; ~3 steps of slack on the worst spacing.
+  success_timing_tol=0.10,
 )
 
 # Training order. Each gait forks from the previous one's ladder.
@@ -318,7 +378,8 @@ def describe() -> str:
       f"{g.name:7s} v={g.v_min:.2f}-{g.v_max:.2f} m/s (Fr {froude(g.v_min):.2f}-"
       f"{froude(g.v_max):.2f})  duty={g.duty_at(lo):.2f}-{g.duty_at(hi):.2f}  "
       f"f={g.stride_frequency(lo):.2f}-{g.stride_frequency(hi):.2f} Hz  "
-      f"bins={g.speed_bins}  touchdown={g.clock.touchdown}"
+      f"bins={g.speed_bins}  touchdown={g.clock.touchdown}  "
+      f"control={1.0 / g.control_dt:.0f} Hz"
     )
   return "\n".join(lines + check_gait_chain())
 
