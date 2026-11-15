@@ -2,7 +2,8 @@
 
 Observation layout is identical for every gait (the network's input size can never
 change between stages, since each gait starts from the previous gait's weights):
-  gait_command   [2]  forward speed command, stride frequency (Hz)
+  gait_command   [3]  forward speed command, stride frequency (Hz), yaw-rate command
+                      (sign * v_cmd / r on refine turns, 0 when straight)
   gait_clock     [8]  sin/cos of each leg's phase
   gait_onehot    [4]  which gait (NUM_GAITS wide, fixed). Constant within a policy, kept
                       so the four policies can later be distilled into one.
@@ -36,7 +37,7 @@ def _term(env: ManagerBasedRlEnv, command_name: str) -> GaitCommand:
 
 def gait_command(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
   t = _term(env, command_name)
-  return torch.stack([t.speed, t.stride_freq], dim=1)
+  return torch.stack([t.speed, t.stride_freq, t.yaw_rate], dim=1)
 
 
 def gait_clock(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:

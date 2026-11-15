@@ -1,0 +1,10 @@
+{
+  "run": "gaits_v4",
+  "note": "Final per-gait policies loaded by scripts/Multiplay.py. Full checkpoints (actor, critic, optimizer, SGS state); Multiplay loads the actor only.",
+  "policies": {
+    "walk":   {"file": "walk.pt",   "task": "Multi-Gait_straight_flat_SGS-Walk-Refine",   "source": "walk-refine/2026-11-15_04-43-01_walk-refine/model_1000.pt",     "control_hz": 50},
+    "trot":   {"file": "trot.pt",   "task": "Multi-Gait_straight_flat_SGS-Trot-Refine",   "source": "trot-refine/2026-11-15_08-12-39_trot-refine/model_800.pt",      "control_hz": 50},
+    "canter": {"file": "canter.pt", "task": "Multi-Gait_straight_flat_SGS-Canter-Refine", "source": "canter-refine/2026-11-15_09-51-44_canter-refine/model_1000.pt", "control_hz": 50},
+    "gallop": {"file": "gallop.pt", "task": "Multi-Gait_straight_flat_SGS-Gallop-Refine", "source": "gallop-refine/2026-11-15_10-48-21_gallop-refine/model_700.pt",   "control_hz": 100}
+  }
+}

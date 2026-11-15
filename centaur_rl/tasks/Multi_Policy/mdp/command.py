@@ -1,7 +1,10 @@
-"""Gait command: straight-line forward speed + the gait's foot-contact clock.
+"""Gait command: forward speed (and, in refine, a circular arc) + the gait's foot clock.
 
-The command is (lin_x, 0, 0): no lateral and no yaw command, ever. On top of the
-velocity the term runs the gait clock (single source of truth for every reward,
+The command is (lin_x, 0, ang_z): never a lateral command. Ladder and handoff stages are
+straight (ang_z = 0). In refine (cfg.turns) every episode also has a turn radius r and a
+direction: ang_z = sign * lin_x_cmd / r, a non-holonomic arc (no turning on the spot),
+recomputed from the commanded speed whenever it changes, r fixed for the episode. On top
+of the velocity the term runs the gait clock (single source of truth for every reward,
 observation and metric that needs the schedule):
 
   cycles  gait cycles since the episode started, integrated from the stride frequency
@@ -16,8 +19,9 @@ moving) needs the episode's speed BEFORE the command manager resets, so the firs
 of each episode is drawn by `draw_episode_speed`, called from the reset event, and the
 command reset then uses it.
 
-Mid-episode resampling (refinement) draws a new speed uniformly over the range, up or
-down, so the policy practises speed changes inside its gait.
+Mid-episode resampling (refinement) draws a new speed, up or down, so the policy
+practises speed changes inside its gait: uniformly over the range, or with turns over
+the speeds for which SGS has unlocked the episode's radius (SpeedSGS.resample_speed).
 """
 
 from __future__ import annotations
@@ -54,6 +58,12 @@ class GaitCommand(CommandTerm):
     self.from_rest = torch.zeros(n, dtype=torch.bool, device=dev)
 
     self.vel_command_b = torch.zeros(n, 3, device=dev)
+    # Turn of the episode: radius (inf = straight) and direction (+1 left, -1 right).
+    self.radius = torch.full((n,), math.inf, device=dev)
+    self.turn_sign = torch.ones(n, device=dev)
+    self._next_radius = torch.full((n,), math.inf, device=dev)
+    self._next_sign = torch.ones(n, device=dev)
+    self._radii = torch.tensor(cfg.turn_radii or (math.inf,), device=dev)
     self.stride_freq = torch.full((n,), cfg.f_min, device=dev)
     # [B, feet] per-leg duty (sensor order), follows the speed when air_time is set.
     self.duty = torch.full((n, self.num_feet), cfg.duty_factor, device=dev)
@@ -65,12 +75,16 @@ class GaitCommand(CommandTerm):
     self.gait_onehot = torch.zeros(n, cfg.num_gaits, device=dev)
     self.gait_onehot[:, cfg.gait_index] = 1.0
 
+    # Play only: callable(command, dt) that steers the turn each step (tools/joystick.py).
+    self.joystick = None
+
     self._next_speed = torch.zeros(n, device=dev)
     self._has_next = torch.zeros(n, dtype=torch.bool, device=dev)
 
     # Episode accumulators for the SGS success test (signed errors, after settle time).
     self.ep_err_x = torch.zeros(n, device=dev)
-    self.ep_yaw = torch.zeros(n, device=dev)
+    self.ep_yaw = torch.zeros(n, device=dev)  # signed yaw-rate error sum (w_z - w_cmd)
+    self.ep_cmd_yaw = torch.zeros(n, device=dev)  # |w_cmd| sum
     self.ep_cmd = torch.zeros(n, device=dev)
     self.ep_steps = torch.zeros(n, device=dev)
     self.ep_time = torch.zeros(n, device=dev)
@@ -103,6 +117,18 @@ class GaitCommand(CommandTerm):
   @property
   def speed(self) -> torch.Tensor:
     return self.vel_command_b[:, 0]
+
+  @property
+  def yaw_rate(self) -> torch.Tensor:
+    return self.vel_command_b[:, 2]
+
+  @property
+  def curvature(self) -> torch.Tensor:
+    """[B] signed 1 / r of the commanded arc (0 when straight; + = left)."""
+    return self.turn_sign / self.radius
+
+  def is_turning(self) -> torch.Tensor:
+    return torch.isfinite(self.radius)
 
   def is_moving(self) -> torch.Tensor:
     return self.speed > self.cfg.move_threshold
@@ -165,27 +191,50 @@ class GaitCommand(CommandTerm):
     return obs * self.is_moving().float().unsqueeze(1)
 
   def draw_episode_speed(self, env_ids: torch.Tensor) -> torch.Tensor:
-    """Draw (once) the first commanded speed of the episode starting in env_ids."""
-    sgs = getattr(self._env, "sgs", None)
-    if sgs is not None and sgs.command_name == self.cfg.command_name:
+    """Draw (once) the first commanded speed and the turn of the episode starting in
+    env_ids. Returns the speed; the turn is kept for the command reset."""
+    sgs = self._sgs()
+    k = len(env_ids)
+    if sgs is not None:
       v = sgs.speed_of(env_ids)
     else:
-      v = self._uniform_speed(len(env_ids))
+      v = self._uniform_speed(k)
+    radius = torch.full((k,), math.inf, device=self.device)
+    sign = torch.where(torch.rand(k, device=self.device) < 0.5, 1.0, -1.0)
+    if self.cfg.play_radius is not None:
+      r = self.cfg.play_radius
+      radius[:] = abs(r) if r != 0 else math.inf
+      sign[:] = 1.0 if r >= 0 else -1.0
+    elif self.cfg.turns:
+      if sgs is not None:
+        radius = sgs.radius_of(env_ids)
+      else:  # play: a random radius bin that is feasible at this speed
+        ok = v.square().unsqueeze(1) / self._radii.unsqueeze(0) <= self.cfg.turn_max_lat_accel
+        ok[:, 0] = True
+        radius = self._radii[torch.multinomial(ok.float(), 1).squeeze(1)]
     self._next_speed[env_ids] = v
+    self._next_radius[env_ids] = radius
+    self._next_sign[env_ids] = sign
     self._has_next[env_ids] = True
     return v
 
   def episode_outcome(self, env_ids: torch.Tensor) -> tuple[torch.Tensor, ...]:
-    """(mean signed vx error, mean yaw rate, mean |v_cmd|, counted seconds)."""
+    """(mean signed vx error, mean signed yaw-rate error, mean |v_cmd|, counted seconds,
+    mean |yaw-rate command|)."""
     n = self.ep_steps[env_ids].clamp(min=1)
     return (
       self.ep_err_x[env_ids] / n,
       self.ep_yaw[env_ids] / n,
       self.ep_cmd[env_ids] / n,
       self.ep_steps[env_ids] * self._env.step_dt,
+      self.ep_cmd_yaw[env_ids] / n,
     )
 
   # ------------------------------------------------------------------ internals
+  def _sgs(self):
+    sgs = getattr(self._env, "sgs", None)
+    return sgs if sgs is not None and sgs.command_name == self.cfg.command_name else None
+
   def _uniform_speed(self, k: int) -> torch.Tensor:
     lo, hi = self.cfg.speed_range
     return lo + (hi - lo) * torch.rand(k, device=self.device)
@@ -193,6 +242,8 @@ class GaitCommand(CommandTerm):
   def _set_speed(self, env_ids: torch.Tensor, v: torch.Tensor) -> None:
     self.vel_command_b[env_ids] = 0.0
     self.vel_command_b[env_ids, 0] = v
+    # Non-holonomic arc: yaw rate from the commanded speed and the episode's radius.
+    self.vel_command_b[env_ids, 2] = self.turn_sign[env_ids] * v / self.radius[env_ids]
     f = self.frequency_of(v)
     self.stride_freq[env_ids] = f
     self.duty[env_ids] = self.duty_of(f)
@@ -204,24 +255,47 @@ class GaitCommand(CommandTerm):
       missing = ~self._has_next[ids]
       if missing.any():
         self.draw_episode_speed(ids[missing])
+      self.radius[ids] = self._next_radius[ids]
+      self.turn_sign[ids] = self._next_sign[ids]
       self._set_speed(ids, self._next_speed[ids])
       self._has_next[ids] = False
       if self.cfg.random_start_phase:
         self.gait_cycles[ids] = torch.rand(len(ids), device=self.device)
       else:
         self.gait_cycles[ids] = 0.0
-      for buf in (self.ep_err_x, self.ep_yaw, self.ep_cmd, self.ep_steps, self.ep_time,
-                  self.ep_tim_err, self.ep_strides):
+      for buf in (self.ep_err_x, self.ep_yaw, self.ep_cmd_yaw, self.ep_cmd, self.ep_steps,
+                  self.ep_time, self.ep_tim_err, self.ep_strides):
         buf[ids] = 0.0
       self.last_td[ids] = -1.0
       self.prev_fl[ids] = -1.0
     if (~starting).any():
       ids = env_ids[~starting]
       if self.cfg.resample_mid_episode:
-        self._set_speed(ids, self._uniform_speed(len(ids)))
+        sgs = self._sgs()
+        if sgs is not None and self.cfg.turns and self.cfg.play_radius is None:
+          v = sgs.resample_speed(ids)  # speeds that have this episode's radius unlocked
+        else:
+          v = self._uniform_speed(len(ids))
+        self._set_speed(ids, v)  # radius kept: the yaw rate follows the new speed
+
+  def set_stick_turn(self, s: float) -> None:
+    """Play: steer every env at stick position s in [-1, 1] (+ = left). The curvature is
+    s * kappa_max(v) with kappa_max = min(1 / r_min, a_lat / v^2), the same limits the
+    refine curriculum trains within; ang_z = v * curvature as in training."""
+    c = self.cfg
+    v = self.speed
+    kmax = torch.full_like(v, 1.0 / min(c.turn_radii))
+    kmax = torch.minimum(kmax, c.turn_max_lat_accel * 9.81 / v.square().clamp(min=1e-6))
+    kappa = s * kmax
+    straight = kappa.abs() < 1e-4
+    self.turn_sign[:] = torch.where(kappa >= 0, 1.0, -1.0)
+    self.radius[:] = torch.where(straight, math.inf, 1.0 / kappa.abs().clamp(min=1e-4))
+    self.vel_command_b[:, 2] = v * kappa
 
   def _update_command(self) -> None:
     dt = self._env.step_dt
+    if self.joystick is not None:
+      self.joystick(self, dt)
     self.gait_cycles = torch.where(
       self.is_moving(), self.gait_cycles + dt * self.stride_freq, self.gait_cycles
     )
@@ -232,14 +306,16 @@ class GaitCommand(CommandTerm):
     v = self.robot.data.root_link_lin_vel_b
     w = self.robot.data.root_link_ang_vel_b
     err_x = v[:, 0] - self.vel_command_b[:, 0]
+    err_yaw = w[:, 2] - self.vel_command_b[:, 2]
     self.metrics["error_vel_x"] += err_x.abs() / max_steps
     self.metrics["error_vel_y"] += v[:, 1].abs() / max_steps
-    self.metrics["error_vel_yaw"] += w[:, 2].abs() / max_steps
+    self.metrics["error_vel_yaw"] += err_yaw.abs() / max_steps
 
     self.ep_time += dt
     counted = (self.ep_time > self.cfg.settle_time).float()
     self.ep_err_x += counted * err_x
-    self.ep_yaw += counted * w[:, 2]
+    self.ep_yaw += counted * err_yaw
+    self.ep_cmd_yaw += counted * self.vel_command_b[:, 2].abs()
     self.ep_cmd += counted * self.vel_command_b[:, 0].abs()
     self.ep_steps += counted
     if self.cfg.track_footfalls:
@@ -304,6 +380,13 @@ class GaitCommandCfg(CommandTermCfg):
   f_max: float
   random_start_phase: bool = True
   resample_mid_episode: bool = False
+  # Turns (refine only): radius bins (widest first) and the lateral-acceleration cap used
+  # when no SGS picks the radius (play). play_radius fixes a signed radius (m, + = left;
+  # 0 = straight) for every episode.
+  turns: bool = False
+  turn_radii: tuple[float, ...] = ()
+  turn_max_lat_accel: float = math.inf
+  play_radius: float | None = None
   move_threshold: float = 0.05
   settle_time: float = 1.0
 

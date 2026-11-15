@@ -40,6 +40,19 @@ class PlayConfig:
   viewer: Literal["auto", "native", "viser"] = "auto"
   no_terminations: bool = False
   """Disable all termination conditions (useful for viewing motions with dummy agents)."""
+  speed: float | None = None
+  """Multi-gait tasks: hold the commanded forward speed (m/s) for the whole episode
+  instead of resampling it across the gait's range. For a LADDER checkpoint the default
+  is the fastest speed it had mastered when it was saved (its SGS frontier)."""
+  radius: float | None = None
+  """Multi-gait tasks: hold a turn of this radius (m, + = left, - = right, 0 = straight)
+  for the whole episode: ang_z = lin_x_cmd / radius. Default: refine tasks pick a random
+  feasible radius per episode, the other phases drive straight."""
+
+  joystick: bool = False
+  """Multi-gait Refine tasks: steer with a gamepad. Hold L1 to turn left and R1 to turn
+  right; the turn tightens while held and straightens on release, within the limits the
+  curriculum trains (ang_z = v * curvature). Combine with --speed to set the speed."""
 
   # Internal flag used by demo script.
   _demo_mode: tyro.conf.Suppress[bool] = False
@@ -113,6 +126,32 @@ def run_play(task_id: str, cfg: PlayConfig):
       )
     log_dir = resume_path.parent
 
+  # Constant command speed: --speed, or for a multi-gait ladder checkpoint the fastest
+  # speed it had mastered (its SGS frontier at save time).
+  play_speed = cfg.speed
+  if "gait" in env_cfg.commands and play_speed is None and resume_path is not None:
+    from centaur_rl.tasks.Multi_Policy.pipeline import ladder_play_speed
+
+    infos = torch.load(resume_path, map_location="cpu", weights_only=False).get("infos")
+    found = ladder_play_speed(task_id, infos)
+    if found is not None:
+      play_speed, note = found
+      print(f"[INFO]: {note}")
+  if play_speed is not None:
+    if "gait" not in env_cfg.commands:
+      raise ValueError("--speed needs a multi-gait task (the 'gait' command)")
+    gait_cmd = env_cfg.commands["gait"]
+    gait_cmd.speed_range = (play_speed, play_speed)
+    gait_cmd.resample_mid_episode = False
+    gait_cmd.resampling_time_range = (1e6, 1e6)
+    print(f"[INFO]: Constant command speed {play_speed:.2f} m/s")
+  if cfg.radius is not None:
+    if "gait" not in env_cfg.commands:
+      raise ValueError("--radius needs a multi-gait task (the 'gait' command)")
+    env_cfg.commands["gait"].play_radius = cfg.radius
+    side = "straight" if cfg.radius == 0 else ("left" if cfg.radius > 0 else "right")
+    print(f"[INFO]: Constant turn radius {abs(cfg.radius):.2f} m ({side})")
+
   if cfg.num_envs is not None:
     env_cfg.scene.num_envs = cfg.num_envs
   if cfg.video_height is not None:
@@ -137,6 +176,13 @@ def run_play(task_id: str, cfg: PlayConfig):
       video_length=cfg.video_length,
       disable_logger=True,
     )
+
+  if cfg.joystick:
+    if "gait" not in env_cfg.commands:
+      raise ValueError("--joystick needs a multi-gait task (the 'gait' command)")
+    from centaur_rl.tasks.Multi_Policy.tools.joystick import attach
+
+    attach(env)
 
   env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
   if DUMMY_MODE:
@@ -200,6 +246,10 @@ def main():
   # Parse the rest of the arguments + allow overriding env_cfg and agent_cfg.
   agent_cfg = load_rl_cfg(chosen_task)
 
+  # mjlab turns off bare-flag booleans; accept a bare `--joystick` anyway.
+  for i, a in enumerate(remaining_args):
+    if a == "--joystick" and (i + 1 == len(remaining_args) or remaining_args[i + 1].startswith("--")):
+      remaining_args[i] = "--joystick=True"
   args = tyro.cli(
     PlayConfig,
     args=remaining_args,

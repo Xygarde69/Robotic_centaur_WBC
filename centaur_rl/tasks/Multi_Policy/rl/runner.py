@@ -87,15 +87,41 @@ class MultiGaitRunner(MjlabOnPolicyRunner):
       p.requires_grad_(trainable)
     self._actor_frozen = not trainable
 
+  def _set_learning_rate(self, lr: float) -> None:
+    self.alg.learning_rate = lr
+    for group in self.alg.optimizer.param_groups:
+      group["lr"] = lr
+
   def _wrap_update(self) -> None:
+    """Critic warmup: the actor is frozen for the first `_warmup` updates.
+
+    The learning rate is held at its configured base value during the warmup (schedule
+    "fixed") and the configured schedule resumes from the base value at the first unfrozen
+    update. With the actor frozen the KL between rollout and
+    updated policy is ~0 (only the re-adapting obs normalizer moves it), so PPO's adaptive
+    schedule raised the rate by 1.5x per minibatch to its 1e-2 cap (10x the base 1e-3).
+    In gaits_v4 the first unfrozen update then ran at 1e-2 and wrecked the forked actor
+    in one iteration (trot episode length 148 -> 5 steps), after which the schedule
+    dropped the rate to 1e-5 and the policy recovered into falling, then standing."""
     update = self.alg.update
+    base_lr = float(self.alg.learning_rate)
+    schedule = self.alg.schedule
 
     def update_with_warmup() -> dict[str, float]:
       frozen = self._updates < self._warmup
       if frozen != self._actor_frozen:
         self._set_actor_trainable(not frozen)
+        if not frozen:
+          self._set_learning_rate(base_lr)
         print(f"[MultiGait] actor {'FROZEN (critic warmup)' if frozen else 'unfrozen'} "
-              f"at update {self._updates}")
+              f"at update {self._updates} (lr {self.alg.learning_rate:.1e})")
+      if frozen:
+        # Fixed rate while frozen: the adaptive schedule steps the rate after every
+        # minibatch, so it would still climb to the cap within each update.
+        self.alg.schedule = "fixed"
+        self._set_learning_rate(base_lr)
+      else:
+        self.alg.schedule = schedule
       out = update()
       out["actor_frozen"] = float(frozen)
       self._updates += 1

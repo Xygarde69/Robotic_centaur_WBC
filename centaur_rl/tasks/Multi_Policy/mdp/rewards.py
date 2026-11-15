@@ -205,35 +205,113 @@ def track_linear_velocity(
   return torch.exp(-err / s.square())
 
 
-def track_angular_velocity(
-  env: ManagerBasedRlEnv, std: float, command_name: str, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG
+def forward_progress(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  min_command: float = 0.05,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-  """exp(-((w_z_cmd - w_z)^2 + 0.05 |w_xy|^2) / std^2)."""
+  """clamp(v_x / v_cmd, 0, 1): share of the commanded forward speed actually reached
+  (1 when the command is below min_command, i.e. nothing to track)."""
+  asset: Entity = env.scene[asset_cfg.name]
+  v_cmd = env.command_manager.get_command(command_name)[:, 0]
+  v = asset.data.root_link_lin_vel_b[:, 0]
+  p = (v / v_cmd.clamp(min=min_command)).clamp(0.0, 1.0)
+  return torch.where(v_cmd.abs() < min_command, torch.ones_like(p), p)
+
+
+def track_angular_velocity(
+  env: ManagerBasedRlEnv,
+  std: float,
+  command_name: str,
+  xy_weight: float = 0.05,
+  gate_by_progress: bool = False,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """exp(-((w_z_cmd - w_z)^2 + xy_weight |w_xy|^2) / std^2), times forward_progress when
+  gate_by_progress.
+
+  xy_weight 0.05 is the walking task's; the sharp turn term (track_yaw_fine) uses 0 so
+  that it scores the yaw rate alone (with std 0.25 the 0.05 roll/pitch share would weigh
+  0.8 w_xy^2, mostly the canter/gallop's natural pitching).
+
+  The gate: in gaits_v4 the second trot fork learned to STAND (v_x -0.05 m/s at every
+  command) because standing still scored this term at 0.97 (no yaw rate needed on
+  near-straight radii), plus track_yaw_fine and track_turn_lean, while the linear kernel
+  gives no gradient 2 m/s away from the command. Gated, these pay nothing at a standstill
+  and grow linearly with the speed reached."""
   asset: Entity = env.scene[asset_cfg.name]
   cmd = env.command_manager.get_command(command_name)
   w = asset.data.root_link_ang_vel_b
-  err = (cmd[:, 2] - w[:, 2]).square() + 0.05 * w[:, :2].square().sum(dim=1)
-  return torch.exp(-err / std**2)
+  err = (cmd[:, 2] - w[:, 2]).square() + xy_weight * w[:, :2].square().sum(dim=1)
+  r = torch.exp(-err / std**2)
+  return r * forward_progress(env, command_name) if gate_by_progress else r
 
 
 def body_orientation_roll_pitch(
   env: ManagerBasedRlEnv,
   roll_weight: float = 1.0,
   pitch_weight: float = 1.0,
+  command_name: str | None = None,
+  gravity: float = 9.81,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-  """pitch_weight * g_x^2 + roll_weight * g_y^2 of the body's projected gravity.
+  """pitch_weight * g_x^2 + roll_weight * (g_y - sin(theta))^2 of the body's projected
+  gravity, roll measured from the equilibrium lean of the commanded turn (the walking
+  task's term, centaur_rl/tasks/walking/mdp/rewards.py).
 
-  The walking version measures roll from the lean of the commanded turn; the command
-  here is always straight, so the target is upright.
+  An arc of curvature k = 1 / r at speed v needs a centripetal acceleration v^2 k, which
+  leaning into the turn by theta = atan(v^2 k / g) balances; at that lean gravity has
+  body-frame y component sin(theta) (positive = leaning left, for a left turn, k > 0).
+  v is the measured forward speed, k the command's. Straight (k = 0, ladder / handoff, or
+  no command_name) the target is upright, as before.
   """
+  g, roll_target = _gravity_and_turn_lean(env, command_name, gravity, asset_cfg)
+  return pitch_weight * g[:, 0].square() + roll_weight * (g[:, 1] - roll_target).square()
+
+
+def _gravity_and_turn_lean(
+  env: ManagerBasedRlEnv, command_name: str | None, gravity: float, asset_cfg: SceneEntityCfg
+) -> tuple[torch.Tensor, torch.Tensor]:
+  """(body-frame gravity [B, 3], target g_y = sin(atan(v^2 k / g)) of the commanded turn [B]).
+
+  g_y > 0 is leaning left, the lean of a left turn (k > 0). v is the measured forward
+  speed, k the command's curvature; the target is 0 (upright) when straight or with no
+  command_name."""
   asset: Entity = env.scene[asset_cfg.name]
   if asset_cfg.body_ids:
     quat = asset.data.body_link_quat_w[:, asset_cfg.body_ids, :].squeeze(1)
     g = quat_apply_inverse(quat, asset.data.gravity_vec_w)
   else:
     g = asset.data.projected_gravity_b
-  return pitch_weight * g[:, 0].square() + roll_weight * g[:, 1].square()
+  roll_target = torch.zeros_like(g[:, 1])
+  if command_name is not None:
+    k = env.command_manager.get_term(command_name).curvature
+    v = asset.data.root_link_lin_vel_b[:, 0]
+    roll_target = torch.sin(torch.atan(v.square() * k / gravity))
+  return g, roll_target
+
+
+def track_turn_lean(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  std: float,
+  gravity: float = 9.81,
+  gate_by_progress: bool = False,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """exp(-(g_y - sin(theta))^2 / std^2), times forward_progress when gate_by_progress
+  (see track_angular_velocity): reward for leaning into the commanded turn by
+  its equilibrium angle theta = atan(v^2 k / g) (the roll target of
+  body_orientation_roll_pitch; upright when straight).
+
+  The L2 term alone hardly asks for the lean: it is flat near its minimum, so staying
+  upright through an 8.4 deg turn (walk, 1.2 m/s on 1 m) costs only 0.021 * weight per
+  step. This kernel scores that 0.01 (std 0.07 ~ 4 deg) against 1.0 when leaning right.
+  """
+  g, roll_target = _gravity_and_turn_lean(env, command_name, gravity, asset_cfg)
+  r = torch.exp(-(g[:, 1] - roll_target).square() / std**2)
+  return r * forward_progress(env, command_name) if gate_by_progress else r
 
 
 def body_angular_velocity_roll_pitch(
@@ -250,11 +328,22 @@ def body_angular_velocity_roll_pitch(
   return roll_weight * w[:, 0].square() + pitch_weight * w[:, 1].square()
 
 
-def angular_momentum_penalty(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tensor:
-  """|L|^2 of the whole-body angular momentum (subtreeangmom sensor on base_link)."""
+def angular_momentum_penalty(
+  env: ManagerBasedRlEnv, sensor_name: str, command_name: str | None = None
+) -> torch.Tensor:
+  """|L|^2 of the whole-body angular momentum (subtreeangmom sensor on base_link).
+
+  With command_name, envs on a commanded turn drop the vertical (yaw) component: a yaw
+  rate of v / r needs yaw angular momentum, and track_angular_velocity already scores
+  the yaw rate. Straight envs are unchanged.
+  """
   sensor: BuiltinSensor = env.scene[sensor_name]
-  sq = sensor.data.square().sum(dim=-1)
+  L = sensor.data
+  sq = L.square().sum(dim=-1)
   env.extras["log"]["Metrics/angular_momentum_mean"] = sq.sqrt().mean()
+  if command_name is not None:
+    turning = env.command_manager.get_term(command_name).is_turning()
+    sq = torch.where(turning, L[:, :2].square().sum(dim=-1), sq)
   return sq
 
 

@@ -517,3 +517,58 @@ D. Checked
 
 E. Open
    right lead only; weights untuned; 50 Hz canter -> 100 Hz gallop fork untested.
+
+
+[2026-11-14] STAGE BUDGETS + LADDER PLAY SPEED - Multi_Policy, scripts/play.py
+------------------------------------------------------------------------------
+User request: ladder 2000 iterations, refine 5000; play.py should play a ladder policy at
+the speed it had most recently learned.
+
+- gaits.StageBudget: ladder_iterations 1000 -> 2000, refine_iterations 10000 -> 5000.
+  The orchestrator rebuilds its plan from these on every start (--resume only skips done
+  jobs), so they apply to every job not yet finished; a pipeline already running keeps
+  the plan it started with.
+- play.py --speed V: constant command (no mid-episode resampling), multi-gait tasks.
+- Ladder checkpoints play at a constant speed by default: pipeline.ladder_play_speed
+  reads the SGS state saved in the checkpoint (infos["sgs"]) and returns the lower edge
+  of the frontier bin = top of the last mastered bin (bottom of the range if none; v_max
+  if the last bin is mastered too). LADDER_ADVANCE_THRESHOLD / LADDER_MIN_OUTCOMES moved
+  to pipeline.py so env_cfg._sgs and this test share them.
+  Checked: walk-ladder model_999 (frontier 0) -> 0.15 m/s; refine checkpoints -> unchanged
+  play; synthetic frontier 4 -> 0.61 m/s; gallop last bin mastered -> 8.0 m/s; gait
+  mismatch between checkpoint and task -> error; play.py launches and prints the speed.
+
+
+[2026-11-14] TURNS IN REFINE - centaur_rl/tasks/Multi_Policy, scripts/play.py
+-----------------------------------------------------------------------------
+User request: turns in the refine stage only, every gait; non-holonomic (ang_z =
+lin_x_cmd / r, from the COMMANDED speed, recomputed when it changes); the radius an SGS
+parameter, harder as it shrinks, starting at 10000 m; per-gait reward tweaks if needed.
+Doc: docs/multi_policy.md (Turns).
+
+- GaitSpec: turn_radius_min (walk 1.0, trot 1.5, canter 2.5, gallop 4.0 m),
+  turn_radius_max 10000, 9 log-spaced bins, turn_max_lat_accel 0.4 g (feasibility cap
+  v_hi^2 / r).
+- SpeedSGS refine: speed x radius configs, per-speed radius frontier (advance at >= 0.8
+  over >= 50 outcomes, the ladder rule), 50% frontier draws / 50% SGS over unlocked;
+  resample_speed keeps the episode's radius legal; yaw success on the signed yaw-rate
+  error, tol max(0.2, 0.2 |w_cmd|). Ladder mode unchanged.
+- GaitCommand: per-episode radius + direction, yaw = sign * v_cmd / r; cfg turns /
+  turn_radii / play_radius. Spawns start on the arc. Handoff banks recorded straight.
+- gait_command obs [v_cmd, f, w_cmd]: actor 57 -> 58, critic 88 -> 89. gaits_v1 and
+  every older checkpoint no longer load.
+- Rewards (all four gaits): roll measured from the turn lean atan(v^2 k / g);
+  angular-momentum penalty drops L_z on turning envs. Nothing gait-specific.
+- play.py --radius R.
+
+Checked: all 12 stage envs build (58/89 everywhere), ladder/handoff yaw = 0; refine yaw =
+sign*v/r at every step, radius constant through mid-episode resamples; SGS frontier
+advances only on mastered configs, no infeasible config sampled, resample at a tight
+radius stays in legal speed bins; lean and angular-momentum terms on synthetic inputs;
+pipeline smoke walk-ladder -> walk-refine and canter-ladder -> gallop-ladder ->
+gallop-refine; play --speed --radius; old checkpoint fails to load (expected).
+
+play.py --joystick (Refine tasks): L1/R1 steer the turn from a gamepad (DualSense tested), tools/joystick.py reads
+/dev/input/js* directly; GaitCommand.set_stick_turn sets curvature = stick * min(1/r_min, a_lat/v^2).
+Verified: pad + L1/R1 button map found via ioctl, walk-refine checkpoint loads and plays with it, set_stick_turn
+gives w = +-0.25/0.5 rad/s at 0.5 m/s for stick 0.5/1.0.

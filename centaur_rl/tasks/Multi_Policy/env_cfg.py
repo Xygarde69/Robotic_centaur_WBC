@@ -5,9 +5,10 @@ make_env_cfg(spec, phase) is the only factory; every stage task is registered fr
 
   gait   clock, speed range, stride frequency, spawn, terminations, rewards (GaitSpec +
          rewards/<gait>.py)
-  phase  ladder   SpeedSGS "ladder" (V_current climbs), command fixed per episode
-         refine   SpeedSGS "refine" (whole range), command resampled mid-episode
-         handoff  as refine, but a large share of resets start from handoff banks
+  phase  ladder   SpeedSGS "ladder" (V_current climbs), command fixed per episode, straight
+         refine   SpeedSGS "refine" (whole speed range x turn radius 2 km -> R_min),
+                  non-holonomic arcs ang_z = lin_x_cmd / r, speed resampled mid-episode
+         handoff  as refine but straight, and a large share of resets start from banks
 
 What NEVER differs (each gait starts from the previous gait's weights): observation
 layout, action space, action scale, PD gains, torque limit. The control rate is per gait
@@ -42,8 +43,9 @@ from centaur_rl.assets.robots import get_centaur_robot_cfg
 from centaur_rl.assets.robots.centaur.centaur_constants import FOOT_GEOM_NAMES, LEG_NAMES
 from centaur_rl.tasks.Multi_Policy import mdp
 from centaur_rl.tasks.Multi_Policy.gaits import NUM_GAITS, SIM_DT, GaitSpec
+from centaur_rl.tasks.Multi_Policy.pipeline import LADDER_ADVANCE_THRESHOLD, LADDER_MIN_OUTCOMES
 from centaur_rl.tasks.Multi_Policy.rewards import build_rewards
-from centaur_rl.tasks.Multi_Policy.rewards.common import COMMAND, CONTACT_SENSOR, FOOT_SITES
+from centaur_rl.tasks.Multi_Policy.rewards.common import COMMAND, CONTACT_SENSOR, FOOT_SITES, RAMPED_PENALTIES
 
 PHASES = ("ladder", "refine", "handoff")
 
@@ -134,6 +136,10 @@ def _command(spec: GaitSpec, phase: str, play: bool) -> mdp.GaitCommandCfg:
     contact_sensor=CONTACT_SENSOR,
     random_start_phase=spec.random_start_phase,
     settle_time=spec.settle_time,
+    # Turns in the refine stage only (ladder and handoff stay straight).
+    turns=phase == "refine",
+    turn_radii=spec.turn_radii,
+    turn_max_lat_accel=spec.turn_max_lat_accel,
   )
 
 
@@ -216,15 +222,36 @@ def _sgs(spec: GaitSpec, phase: str) -> CurriculumTermCfg:
       "err_abs": spec.success_err_abs,
       "err_rel": spec.success_err_rel,
       "err_yaw": spec.success_err_yaw,
-      "timing_tol": spec.success_timing_tol,
+      # Footfall timing is logged (Metrics/footfall_timing_error) but NOT part of the
+      # success test: in run gaits_v2 the walk refine's error sat at ~0.26 against a 0.05
+      # tolerance, so every episode failed, the radius frontier never left the widest
+      # radius and the policy never saw a turn. The clock rewards still shape footfalls.
+      "timing_tol": None,
+      "err_yaw_rel": 0.2,  # turns: |mean yaw-rate error| <= max(err_yaw, 0.2 |w_cmd|)
       "min_counted_time": 2.0,
+      # Turn-radius axis (refine only): per-speed radius frontier, widest radius first.
+      "turn_radii": spec.turn_radii if phase == "refine" else (),
+      "turn_max_lat_accel": spec.turn_max_lat_accel,
+      "refine_frontier_prob": 0.5,
       # Ladder: mostly at V_current, the rest replays slower mastered speeds.
       "frontier_prob": 0.8,
-      "advance_threshold": 0.8,
+      "advance_threshold": LADDER_ADVANCE_THRESHOLD,
       "retreat_threshold": 0.0,
-      "min_outcomes": 50,
+      "min_outcomes": LADDER_MIN_OUTCOMES,
     },
   )
+
+
+def _curriculum(spec: GaitSpec, phase: str) -> dict[str, CurriculumTermCfg]:
+  terms = {"sgs": _sgs(spec, phase)}
+  iters = spec.budget.penalty_ramp_iterations
+  if iters > 0 and phase == "refine":
+    steps_per_iteration = round(24 * 0.02 / spec.control_dt)  # rl/cfg.py NUM_STEPS_PER_ENV rescaled
+    terms["penalty_ramp"] = CurriculumTermCfg(
+      func=mdp.PenaltyRamp,
+      params={"terms": RAMPED_PENALTIES, "start_scale": 0.1, "ramp_steps": iters * steps_per_iteration},
+    )
+  return terms
 
 
 def make_env_cfg(spec: GaitSpec, phase: str = "ladder", play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -259,7 +286,7 @@ def make_env_cfg(spec: GaitSpec, phase: str = "ladder", play: bool = False) -> M
     events=_events(spec, phase),
     rewards=build_rewards(spec),
     terminations=_terminations(spec),
-    curriculum={"sgs": _sgs(spec, phase)},
+    curriculum=_curriculum(spec, phase),
     metrics=_metrics(),
     viewer=ViewerConfig(
       origin_type=ViewerConfig.OriginType.ASSET_BODY,

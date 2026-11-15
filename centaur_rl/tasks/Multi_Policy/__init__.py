@@ -8,7 +8,7 @@ Each gait is trained in stages (see pipeline.py):
   handoff  optional short fine-tune that starts episodes from states recorded from the
            neighbouring gaits' policies (upshift and downshift handoffs).
 
-The next gait forks from a checkpoint of the previous gait's ladder (actor only: fresh
+The next gait forks from the previous gait's refined policy (actor only: fresh
 critic, fresh rewards, critic warmup with the actor frozen, std floor, observation
 normalizer re-adaptation).
 

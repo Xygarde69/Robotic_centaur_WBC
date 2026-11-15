@@ -109,18 +109,32 @@ class StrideFrequency:
 class StageBudget:
   """Iteration budgets for one gait's stages (see pipeline.py)."""
 
-  ladder_iterations: int = 1000
-  """SGS speed ladder (V_current climbs from v_min to v_max)."""
+  ladder_iterations: int = 2000
+  """SGS speed ladder. Not in the pipeline plan any more (stage tasks only)."""
   fork_iteration: int | None = None
-  """Checkpoint of THIS gait's ladder that the NEXT gait forks from. None = last one."""
+  """Checkpoint of THIS gait's refine that the NEXT gait forks from. None = last one."""
   refine_iterations: int = 10000
-  """Whole-range refinement after the ladder. Produces the gait's policy."""
+  """Whole-range refinement with turns. Produces the gait's policy (walk: 5000)."""
   handoff_iterations: int = 500
   """Optional handoff fine-tune on neighbouring gaits' states. 0 disables the stage."""
-  critic_warmup_iterations: int = 200
-  """Fork only: iterations at the start of the ladder with the actor frozen."""
-  fork_std_floor: float = 0.6
-  """Fork only: action std is raised to at least this so the new gait can explore."""
+  critic_warmup_iterations: int = 50
+  """Fork only: iterations at the start of the refine with the actor frozen. 50: in
+  gaits_v4 the trot critic's value loss had settled by ~40-50 iterations of 200."""
+  fork_from_previous: bool = True
+  """Start this gait's refine as a fork of the previous gait's refined policy. False:
+  from scratch (fresh actor and critic), still after the previous gait and still with its
+  top-speed handoff bank. The gallop trains from scratch: it runs at 100 Hz, and the
+  50 Hz canter actor forked into it fell within 3 s at every speed (gaits_v4)."""
+  scratch_init_std: float = 1.0
+  """From scratch only: initial action std (rsl_rl default 1.0)."""
+  penalty_ramp_iterations: int = 0
+  """> 0: regularisation penalties (rewards/common.RAMPED_PENALTIES) start at 10% of their
+  weight and reach full weight after this many iterations (mdp.PenaltyRamp). For stages
+  trained from scratch; a continued stage would restart the ramp, so keep 0 there."""
+  fork_std_floor: float = 0.4
+  """Fork only: action std is raised to at least this so the new gait can explore. 0.6
+  (0.3 rad of noise per step at action scale 0.5) inflated the action-rate and slip
+  penalties of the gaits_v4 trot fork enough to make falling pay."""
 
 
 @dataclass(frozen=True)
@@ -145,6 +159,10 @@ class GaitSpec:
   refine_handoff_prob: float = 0.2  # share of refine resets started from a bank
   handoff_stage_prob: float = 0.5  # share of handoff-stage resets started from a bank
 
+  # Speed the "<gait>-up" handoff bank is recorded at (the states the next gait starts
+  # from). None = the gait's top speed.
+  up_record_speed: float | None = None
+
   # Refinement: mid-episode command resampling inside the range (seconds).
   refine_resample_time: tuple[float, float] = (4.0, 8.0)
 
@@ -165,6 +183,25 @@ class GaitSpec:
 
   tracking_std: float = 0.5  # m/s, lin-vel tracking kernel width (placeholder)
   budget: StageBudget = field(default_factory=StageBudget)
+
+  # Turns, REFINE stage only (ladder and handoff are straight). Non-holonomic circular
+  # arcs: ang_z = lin_x_cmd / r, recomputed from the commanded speed whenever it changes;
+  # r is fixed per episode and its sign (left / right) is drawn 50/50. The radius is an SGS
+  # axis: turn_radius_bins log-spaced radii from turn_radius_max (2 km, straight in
+  # practice) down to turn_radius_min; smaller = harder, each speed bin unlocks tighter
+  # radii as it masters the current one. A (speed bin, radius) pair is only used when
+  # v_hi^2 / r <= turn_max_lat_accel (foot friction is randomised 0.6-1.2: 0.4 g stays
+  # under the grip limit).
+  turn_radius_min: float = 1.0  # m
+  turn_radius_max: float = 2000.0  # m
+  turn_radius_bins: int = 9
+  turn_max_lat_accel: float = 0.4 * 9.81  # m/s^2
+
+  @property
+  def turn_radii(self) -> tuple[float, ...]:
+    """Radius bins, widest (easiest) first."""
+    n, r0, r1 = self.turn_radius_bins, self.turn_radius_max, self.turn_radius_min
+    return tuple(r0 * (r1 / r0) ** (k / (n - 1)) for k in range(n))
 
   # Control rate: physics substeps (SIM_DT each) per policy step. 4 = 50 Hz. The PPO
   # discount, GAE lambda and rollout length are rescaled from it (rl/cfg.py) so their
@@ -234,6 +271,8 @@ WALK = GaitSpec(
   max_tilt_deg=60.0,
   tracking_std=0.35,
   success_timing_tol=0.05,
+  budget=StageBudget(refine_iterations=5000),
+  turn_radius_min=1.0,  # the walking task's tightest turn
 )
 
 TROT = GaitSpec(
@@ -241,15 +280,18 @@ TROT = GaitSpec(
   index=1,
   speed_range=(1.20, 2.80),  # Froude 0.25: horses start trotting here
   # Diagonal pairs. As in the horse trot (Robilliard et al. 2007: swing time hardly
-  # changes with speed, stance shrinks) each foot's air time is held at ~0.24 s (horse
-  # swing ~0.345 s scaled by sqrt(0.58 / 1.2), see docs/multi_policy.md) and the duty
-  # factor follows the stride frequency: 0.47 at 1.2 m/s -> 0.39 at 2.8 m/s. The flight
-  # between the two stances is (0.5 - duty) / f: 16 ms at 1.2 m/s growing to 43 ms.
+  # changes with speed, stance shrinks) each foot's air time is held fixed and the duty
+  # factor follows the stride frequency. The flight between the two stances is
+  # (0.5 - duty) / f = air_time - 0.5 / f.
+  # air_time 0.28 s: duty 0.38 at 1.2 m/s -> 0.29 at 2.8 m/s, flight 56 -> 82 ms per
+  # phase. It was 0.24 s (the horse swing ~0.345 s scaled by sqrt(0.58 / 1.2)): duty
+  # 0.47 -> 0.39 and only 16 -> 43 ms of flight, which the gaits_v4 trot tracked (88%
+  # airborne at 2.8 m/s) but which reads as a grounded trot.
   clock=GaitClock(
     touchdown=(0.0, 0.5, 0.5, 0.0),
     duty_factor=0.45,
-    air_time=0.24,
-    duty_min=0.35,
+    air_time=0.28,
+    duty_min=0.28,
     duty_max=0.50,
   ),
   # f = 2.0 + 0.19 v: 2.23 Hz at 1.2 m/s, 2.53 Hz at 2.8 m/s (horse-scaled trot, x1.44).
@@ -259,6 +301,7 @@ TROT = GaitSpec(
   tracking_std=0.5,
   # Footfall timing (SGS success): horse trot ratios are 0.50 +- 0.03, so 2 s.d.
   success_timing_tol=0.06,
+  turn_radius_min=1.5,
 )
 
 CANTER = GaitSpec(
@@ -270,18 +313,22 @@ CANTER = GaitSpec(
   # right canter): FR - FL = 0.27 +- 0.03 (0.28 here) and RR - RL = 0.33 (the paper's 0.67
   # is |RH - LH| measured from LF). FL lands just BEFORE RR: if the diagonal hind landed
   # first the footfalls would be a gallop's (Table 1), so the order is part of the gait.
-  # As for the trot, each foot's air time is held (horse swing ~300 ms x 0.69 = 0.20 s)
-  # and the duty factor follows the stride frequency. The single flight is 0.40 - duty
-  # of the cycle after FR lifts: 8 ms at 2.24 m/s (duty capped at 0.38) -> 23 ms at 6 m/s.
-  # duty_min = 0.32 = the FL touchdown: below it RL would lift before the diagonal pair
-  # lands and the stride would get a second flight phase (not a canter). At most 3 feet
-  # are ever down (Table 1: 0-3).
+  # As for the trot, each foot's air time is held and the duty factor follows the stride
+  # frequency. The single flight is 1 - FR touchdown - duty of the cycle, after FR lifts.
+  # duty_min = the FL touchdown: below it RL would lift before the diagonal pair lands and
+  # the stride would get a second flight phase (not a canter). At most 3 feet are ever
+  # down (Table 1: 0-3).
+  # Beats compressed x0.85 for a visible flight: touchdowns (0.51, 0.272, 0.281, 0), so
+  # FR - FL = 0.24 and RR - RL = 0.28 (horse 0.27 +- 0.03 and 0.33 +- 0.05, ~1 s.d. low),
+  # air_time 0.22 s, duty 0.34 -> 0.272: flight 15 -> 22% of the cycle, 51-62 ms. The
+  # horse-exact clock (0.60, 0.32, 0.33, 0), air 0.20 s, duty 0.32-0.38 left only
+  # 8 -> 23 ms (2-8%), the same short flight that made the gaits_v4 trot look grounded.
   clock=GaitClock(
-    touchdown=(0.60, 0.32, 0.33, 0.0),
-    duty_factor=0.36,
-    air_time=0.20,
-    duty_min=0.32,
-    duty_max=0.38,
+    touchdown=(0.51, 0.272, 0.281, 0.0),
+    duty_factor=0.31,
+    air_time=0.22,
+    duty_min=0.272,
+    duty_max=0.34,
   ),
   # Horse f ~ 1.42 + 0.12 v over 5-9 m/s, x1.44 for the leg length: f = 2.04 + 0.25 v
   # (2.60 Hz at 2.24 m/s, 3.54 Hz at 6 m/s). 2.74 Hz at 2.8 m/s vs the trot's 2.53 Hz.
@@ -292,13 +339,16 @@ CANTER = GaitSpec(
   # Footfall timing (SGS success): horse canter ratios are 0.27 +- 0.03 (fore) and
   # +- 0.05 (hind), so ~2 s.d.
   success_timing_tol=0.08,
+  turn_radius_min=2.5,
+  # canter-up (the gallop's handoff bank) at 4 m/s, not the canter's 6 m/s top speed.
+  up_record_speed=4.0,
 )
 
 GALLOP = GaitSpec(
   name="gallop",
   index=3,
   # "4.47 onwards": the top end is OPEN in the spec. 8 m/s (Froude ~11) is a
-  # placeholder ceiling for the ladder; raise it if the policy saturates.
+  # placeholder ceiling; raise it if the policy saturates.
   speed_range=(4.47, 8.00),
   # Right-lead transverse 4-beat: RL (non-lead hind), RR (lead hind), FL (non-lead fore),
   # FR (lead fore), then ONE flight. From Witte, Hirst & Wilson 2006 (4389.pdf, 9-17 m/s
@@ -335,9 +385,14 @@ GALLOP = GaitSpec(
   decimation=2,
   # One 100 Hz step is 0.031-0.036 of a cycle; ~3 steps of slack on the worst spacing.
   success_timing_tol=0.10,
+  turn_radius_min=4.0,
+  # From scratch at std 0.4 (not 1.0), penalties ramped in over 500 iterations: a random
+  # std-1.0 gallop netted ~-15 per second alive vs -4 for falling (gaits_v4 smoke test).
+  budget=StageBudget(fork_from_previous=False, scratch_init_std=0.4, penalty_ramp_iterations=500),
 )
 
-# Training order. Each gait forks from the previous one's ladder.
+# Training order. Each gait forks from the previous one's refined policy (except the
+# gallop, from scratch: StageBudget.fork_from_previous).
 GAITS: tuple[GaitSpec, ...] = (WALK, TROT, CANTER, GALLOP)
 GAIT_BY_NAME: dict[str, GaitSpec] = {g.name: g for g in GAITS}
 NUM_GAITS = 4  # one-hot width; fixed so the obs layout never changes when gaits are added

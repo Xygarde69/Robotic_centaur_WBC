@@ -39,6 +39,8 @@ def record(task: str, checkpoint: str, speed: float, out: str, num_envs: int = 5
   cmd_cfg.speed_range = (speed, speed)
   cmd_cfg.resample_mid_episode = False
   cmd_cfg.resampling_time_range = (1e9, 1e9)
+  cmd_cfg.turns = False  # banks are straight states (the refine env would otherwise turn)
+  cmd_cfg.play_radius = None
   env_cfg.events["reset_gait_state"].params["bank_prob"] = 0.0
   env_cfg.episode_length_s = settle_s + record_s + 5.0
 

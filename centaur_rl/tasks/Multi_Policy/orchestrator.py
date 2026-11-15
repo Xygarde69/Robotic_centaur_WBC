@@ -8,9 +8,14 @@ Pipeline options (this module):
   --gaits walk trot ...    contiguous subset of the chain (default: all four)
   --only JOB [JOB ...]     run just these jobs (their dependencies must be done)
   --stop-after JOB         stop after this job
-  --ladder-iterations N    override every gait's budget (also --refine-iterations,
-  --refine-iterations N      --handoff-iterations (0 disables handoff stages),
-  --fork-iteration N         --fork-iteration, --critic-warmup)
+  --refine-iterations N    override every gait's budget (also --handoff-iterations
+  --handoff-iterations N     (0 disables handoff stages), --fork-iteration,
+  --fork-iteration N         --critic-warmup)
+  --init-checkpoint PATH   start the first gait's refine from PATH instead of scratch
+  --init-mode MODE           continue (same gait, default) | fork (previous gait)
+  --stage-init JOB=PATH    restart JOB from checkpoint PATH in continue mode (actor,
+                             critic, optimizer; no warmup / std floor), e.g. to resume
+                             a stage after a clock or reward change. Repeatable.
   --record-num-envs N      envs used to record handoff banks (default 512)
   --record-settle-s S      seconds the policy runs before states are recorded (3)
   --record-s S             seconds of recording (6)
@@ -66,17 +71,31 @@ def _parser() -> argparse.ArgumentParser:
   p.add_argument("--gaits", nargs="+", default=[g.name for g in GAITS])
   p.add_argument("--only", nargs="+", default=[])
   p.add_argument("--stop-after", default="")
-  p.add_argument("--ladder-iterations", type=int)
   p.add_argument("--refine-iterations", type=int)
   p.add_argument("--handoff-iterations", type=int)
   p.add_argument("--fork-iteration", type=int)
   p.add_argument("--critic-warmup", type=int)
   p.add_argument("--normalizer-window", type=int, default=2_000_000)
+  p.add_argument("--init-checkpoint", default=None)
+  p.add_argument("--init-mode", choices=("continue", "fork"), default="continue")
+  p.add_argument("--stage-init", action="append", default=[], metavar="JOB=PATH")
   p.add_argument("--record-num-envs", type=int, default=512)
   p.add_argument("--record-settle-s", type=float, default=3.0)
   p.add_argument("--record-s", type=float, default=6.0)
   p.add_argument("--dry-run", action="store_true")
   return p
+
+
+def _parse_stage_init(items: list[str]) -> dict[str, str]:
+  out = {}
+  for item in items:
+    name, sep, path = item.partition("=")
+    if not sep or not name or not path:
+      raise SystemExit(f"--stage-init expects JOB=PATH, got {item!r}")
+    if not Path(path).is_file():
+      raise SystemExit(f"--stage-init {name}: no such checkpoint {path}")
+    out[name] = str(Path(path).resolve())
+  return out
 
 
 class Manifest:
@@ -137,6 +156,8 @@ def _train_cmd(job: TrainJob, run: str, root: Path, manifest: Manifest, forwarde
   if job.parent:
     ckpt = _pick_checkpoint(manifest.job(job.parent)["result"], job.parent_iteration)
     cmd += ["--agent.stage.init-checkpoint", ckpt]
+  elif job.init_checkpoint:
+    cmd += ["--agent.stage.init-checkpoint", job.init_checkpoint]
   if job.init_mode == "fork":
     cmd += [
       "--agent.stage.critic-warmup-iterations", str(job.critic_warmup),
@@ -165,12 +186,14 @@ def run_pipeline(argv: list[str]) -> int:
   args, forwarded = _parser().parse_known_args(argv)
   opts = PlanOptions(
     gaits=tuple(args.gaits),
-    ladder_iterations=args.ladder_iterations,
     refine_iterations=args.refine_iterations,
     handoff_iterations=args.handoff_iterations,
     fork_iteration=args.fork_iteration,
     critic_warmup=args.critic_warmup,
     normalizer_window=args.normalizer_window,
+    init_checkpoint=str(Path(args.init_checkpoint).resolve()) if args.init_checkpoint else None,
+    init_mode=args.init_mode,
+    stage_init=_parse_stage_init(args.stage_init),
   )
   jobs = build_plan(opts)
   print(describe_gaits())

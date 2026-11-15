@@ -3,8 +3,10 @@
 Copied from the trot task (tasks/trot: velocity_env_cfg.py rewards, overridden in
 config/centaur/env_cfgs.py), same terms and weights. What changed in the port:
 
-  - command "gait" (lin_x, 0, 0) instead of "twist": no turning, so the roll target of
-    body_orientation is upright and track_angular_velocity just holds w_z = 0;
+  - command "gait" (lin_x, 0, ang_z) instead of "twist": straight in the ladder; in
+    refine non-holonomic arcs ang_z = lin_x_cmd / r. body_orientation's roll target is
+    the turn's equilibrium lean (upright when straight), track_angular_velocity tracks
+    ang_z, angular_momentum ignores the yaw component on turns;
   - the clock is GaitCommand's, not the trot task's fixed 0.6 s period with a
     speed-dependent flight fraction: foot_gait (gait_contact_schedule, exact_weight 0 =
     the trot task's per-foot feet_gait) and foot_suspension both read stance_target, so
@@ -36,7 +38,7 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from centaur_rl.tasks.Multi_Policy import mdp
 from centaur_rl.tasks.Multi_Policy.gaits import TROT, GaitSpec
 
-from .common import COMMAND, CONTACT_SENSOR, FOOT_SITES
+from .common import COMMAND, CONTACT_SENSOR, FOOT_SITES, alive_bonus, track_turn_lean, track_yaw_fine
 
 # Trot task values.
 TRACK_ANG_STD = math.sqrt(0.5)
@@ -71,8 +73,11 @@ def rewards(spec: GaitSpec = TROT) -> dict[str, RewardTermCfg]:
       params={**cmd, "std": spec.tracking_std, "z_weight": TRACK_Z_WEIGHT, "std_rel": TRACK_STD_REL},
     ),
     "track_angular_velocity": RewardTermCfg(
-      func=mdp.track_angular_velocity, weight=1.0, params={**cmd, "std": TRACK_ANG_STD}
+      func=mdp.track_angular_velocity, weight=1.0,
+      params={**cmd, "std": TRACK_ANG_STD, "gate_by_progress": True},
     ),
+    "track_yaw_fine": track_yaw_fine(),
+    "track_turn_lean": track_turn_lean(),
     # Gait clock: fraction of feet matching the schedule (the trot task's feet_gait).
     "foot_gait": RewardTermCfg(
       func=mdp.gait_contact_schedule, weight=0.5, params={**clock, "exact_weight": 0.0}
@@ -86,12 +91,15 @@ def rewards(spec: GaitSpec = TROT) -> dict[str, RewardTermCfg]:
     "excess_contact": RewardTermCfg(func=mdp.feet_excess_contact, weight=-0.3, params=dict(clock)),
     # Suspension: paid while the clock is in a flight phase and all four feet are up.
     # Flight is (1 - 2 duty) of the cycle: 0.06 at 1.2 m/s to 0.21 at 2.8 m/s.
-    "foot_suspension": RewardTermCfg(func=mdp.feet_suspension, weight=0.3, params=dict(clock)),
+    # 2.0: the trot task's 0.3 was worth at most 0.02-0.06 per second with flight
+    # scheduled 8-21% of the time (air_time 0.24), so gaits_v4 skipped it below ~2 m/s.
+    # Now scheduled 25-42% (air_time 0.28): worth up to 0.5-0.8 per second.
+    "foot_suspension": RewardTermCfg(func=mdp.feet_suspension, weight=2.0, params=dict(clock)),
     # Posture / stability.
     "body_orientation_l2": RewardTermCfg(
       func=mdp.body_orientation_roll_pitch,
       weight=-1.0,
-      params={"roll_weight": 1.0, "pitch_weight": 1.0, "asset_cfg": base()},
+      params={"roll_weight": 1.0, "pitch_weight": 1.0, **cmd, "asset_cfg": base()},
     ),
     "body_ang_vel": RewardTermCfg(
       func=mdp.body_angular_velocity_roll_pitch,
@@ -99,7 +107,9 @@ def rewards(spec: GaitSpec = TROT) -> dict[str, RewardTermCfg]:
       params={"roll_weight": 1.0, "pitch_weight": 1.0, "asset_cfg": base()},
     ),
     "angular_momentum": RewardTermCfg(
-      func=mdp.angular_momentum_penalty, weight=-0.025, params={"sensor_name": "robot/root_angmom"}
+      func=mdp.angular_momentum_penalty,
+      weight=-0.025,
+      params={"sensor_name": "robot/root_angmom", **cmd},
     ),
     "pose": RewardTermCfg(
       func=mdp.variable_posture,
@@ -142,6 +152,7 @@ def rewards(spec: GaitSpec = TROT) -> dict[str, RewardTermCfg]:
     ),
     # Regularisation.
     "is_terminated": RewardTermCfg(func=mdp.is_terminated, weight=-200.0),
+    "is_alive": alive_bonus(),
     "joint_acc_l2": RewardTermCfg(func=mdp.joint_acc_l2, weight=-2.5e-7),
     "joint_pos_limits": RewardTermCfg(func=mdp.joint_pos_limits, weight=-10.0),
     # Action scale 0.5 here (0.25 in the trot task): 4x the trot task's -0.05.

@@ -22,7 +22,7 @@ Differences from the canter module:
   - propulsion_split (new): hind pair pushes, fore pair brakes (net fore-aft impulse);
   - excess_contact max 2 feet (canter 3), touchdown_timing std 0.05 (one 100 Hz step is
     0.031-0.036 of a cycle), pitch weight 0.1 (canter 0.2), z weight 0.2 (canter 0.3),
-    foot_suspension 1.0 (the flight is now ~8 control steps, not < 1).
+    foot_suspension 2.0 (first 1.0; the flight is ~6-8 control steps, not < 1).
 
 Control rate. The gallop runs at 100 Hz (gaits.GALLOP.decimation = 2) and mjlab pays
 every term weight * term * dt. Dense terms are per second, so they keep their weights.
@@ -32,6 +32,11 @@ action_rate_l2 is the squared action change per step: for the same smooth motion
 (dt ratio)^2 smaller per step and paid per second, so its weight is multiplied by EVENT^2
 (= 4); -0.4 here is -0.1 at 50 Hz, half the canter's -0.2, because the 60-100 ms stances
 need fast joint motion.
+
+Turns (refine only): body_orientation measures roll from the turn's equilibrium lean,
+track_angular_velocity tracks ang_z = lin_x_cmd / r and angular_momentum ignores the
+yaw component on turns (shared with every gait). The clock is right-lead only, so left
+turns run on the counter-lead; nothing gait-specific was changed for turning.
 
 Weights are first values: nothing has been trained with them yet.
 """
@@ -46,7 +51,7 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from centaur_rl.tasks.Multi_Policy import mdp
 from centaur_rl.tasks.Multi_Policy.gaits import GALLOP, REFERENCE_DT, GaitSpec
 
-from .common import COMMAND, CONTACT_SENSOR, FOOT_SITES
+from .common import COMMAND, CONTACT_SENSOR, FOOT_SITES, alive_bonus, track_turn_lean, track_yaw_fine
 
 TRACK_ANG_STD = math.sqrt(0.5)
 TRACK_Z_WEIGHT = 0.2  # flight time does not grow with speed (Witte 2006): neither should bounce
@@ -90,11 +95,15 @@ def rewards(spec: GaitSpec = GALLOP) -> dict[str, RewardTermCfg]:
       params={**cmd, "std": spec.tracking_std, "z_weight": TRACK_Z_WEIGHT, "std_rel": TRACK_STD_REL},
     ),
     "track_angular_velocity": RewardTermCfg(
-      func=mdp.track_angular_velocity, weight=1.0, params={**cmd, "std": TRACK_ANG_STD}
+      func=mdp.track_angular_velocity, weight=1.0,
+      params={**cmd, "std": TRACK_ANG_STD, "gate_by_progress": True},
     ),
-    # Gait clock: fraction of feet matching the schedule (dense).
+    "track_yaw_fine": track_yaw_fine(),
+    "track_turn_lean": track_turn_lean(),
+    # Gait clock: per-foot match + all-four-feet match (dense). 1.5 with exact 0.5 (first
+    # 0.5 per-foot only), as the canter after its gait drifted at 0.5.
     "foot_gait": RewardTermCfg(
-      func=mdp.gait_contact_schedule, weight=0.5, params={**clock, "exact_weight": 0.0}
+      func=mdp.gait_contact_schedule, weight=1.5, params={**clock, "exact_weight": 0.5}
     ),
     # Landing on time: sparse, 4 landings per stride.
     "touchdown_timing": RewardTermCfg(
@@ -109,7 +118,9 @@ def rewards(spec: GaitSpec = GALLOP) -> dict[str, RewardTermCfg]:
       func=mdp.feet_excess_contact, weight=-0.3, params={**clock, "max_feet": 2}
     ),
     # Flight: paid while the clock is in its flight window and all four feet are up ...
-    "foot_suspension": RewardTermCfg(func=mdp.feet_suspension, weight=1.0, params=dict(clock)),
+    # 2.0 as the trot and canter (first 1.0: worth only 0.2-0.3 per second with flight
+    # scheduled 20-30% of the cycle; the gaits_v4 trot skipped flight that cheap).
+    "foot_suspension": RewardTermCfg(func=mdp.feet_suspension, weight=2.0, params=dict(clock)),
     # ... penalised while all four are up anywhere else (no mid-stride flight, no hops) ...
     "unscheduled_flight": RewardTermCfg(func=mdp.unscheduled_flight, weight=-1.0, params=dict(clock)),
     # ... and scored on its length at the RL touchdown that ends it (sparse).
@@ -136,7 +147,7 @@ def rewards(spec: GaitSpec = GALLOP) -> dict[str, RewardTermCfg]:
     "body_orientation_l2": RewardTermCfg(
       func=mdp.body_orientation_roll_pitch,
       weight=-1.0,
-      params={"roll_weight": ROLL_WEIGHT, "pitch_weight": PITCH_WEIGHT, "asset_cfg": base()},
+      params={"roll_weight": ROLL_WEIGHT, "pitch_weight": PITCH_WEIGHT, **cmd, "asset_cfg": base()},
     ),
     "body_ang_vel": RewardTermCfg(
       func=mdp.body_angular_velocity_roll_pitch,
@@ -144,7 +155,9 @@ def rewards(spec: GaitSpec = GALLOP) -> dict[str, RewardTermCfg]:
       params={"roll_weight": ROLL_WEIGHT, "pitch_weight": PITCH_WEIGHT, "asset_cfg": base()},
     ),
     "angular_momentum": RewardTermCfg(
-      func=mdp.angular_momentum_penalty, weight=-0.025, params={"sensor_name": "robot/root_angmom"}
+      func=mdp.angular_momentum_penalty,
+      weight=-0.025,
+      params={"sensor_name": "robot/root_angmom", **cmd},
     ),
     "pose": RewardTermCfg(
       func=mdp.variable_posture,
@@ -175,6 +188,7 @@ def rewards(spec: GaitSpec = GALLOP) -> dict[str, RewardTermCfg]:
     ),
     # Regularisation.
     "is_terminated": RewardTermCfg(func=mdp.is_terminated, weight=-200.0 * event),
+    "is_alive": alive_bonus(),
     "joint_acc_l2": RewardTermCfg(func=mdp.joint_acc_l2, weight=-2.5e-7),
     "joint_pos_limits": RewardTermCfg(func=mdp.joint_pos_limits, weight=-10.0),
     "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.1 * event**2),

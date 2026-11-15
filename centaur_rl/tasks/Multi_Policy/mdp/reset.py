@@ -107,6 +107,10 @@ class GaitStateReset:
       lin_b = torch.zeros(n, 3, device=env.device)
       lin_b[:, 0] = speed
       root[:, 7:10] = quat_apply(root[:, 3:7], lin_b)
+      # On a turn the robot starts on its arc: yaw rate sign * v / r (0 when straight).
+      ang_b = torch.zeros(n, 3, device=env.device)
+      ang_b[:, 2] = cmd._next_sign[env_ids] * speed / cmd._next_radius[env_ids]
+      root[:, 10:13] = quat_apply(root[:, 3:7], ang_b)
 
     jpos = asset.data.default_joint_pos[env_ids].clone()
     jvel = torch.zeros_like(jpos)

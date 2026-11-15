@@ -27,7 +27,8 @@ for _gait in GAITS:
       env_cfg=make_env_cfg(_gait, _phase),
       play_env_cfg=make_env_cfg(_gait, _phase, play=True),
       rl_cfg=multigait_ppo_cfg(
-        f"{EXPERIMENT_ROOT}/{_gait.name}-{_phase}", _ITERS[_phase](_gait), _gait.control_dt
+        f"{EXPERIMENT_ROOT}/{_gait.name}-{_phase}", _ITERS[_phase](_gait), _gait.control_dt,
+        _gait.budget.scratch_init_std,
       ),
       runner_cls=MultiGaitRunner,
     )

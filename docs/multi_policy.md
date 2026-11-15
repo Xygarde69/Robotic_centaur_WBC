@@ -1,7 +1,8 @@
 # Multi-gait pipeline (`centaur_rl/tasks/Multi_Policy`)
 
 One command trains four gait policies in sequence: walk → trot → canter → gallop. The
-command is a straight line on flat ground (`lin_x` only, never `lin_y` or `ang_z`).
+command is forward speed on flat ground, never `lin_y`. Handoff is straight. The refine stage adds
+non-holonomic turns: `ang_z = lin_x_cmd / r` (see [Turns](#turns-refine-only)).
 Each gait gets its own policy. Every gait after the walk starts from the previous gait's
 weights.
 
@@ -11,31 +12,80 @@ python train.py --multi-Gait_straight_flat_SGS --env.scene.num-envs 4096        
 python train.py --task Multi-Gait_straight_flat_SGS --dry-run                     # print the plan
 python train.py --task Multi-Gait_straight_flat_SGS --run-name R --resume         # continue run R
 python train.py --task Multi-Gait_straight_flat_SGS --gaits walk trot --handoff-iterations 0
-python train.py --task Multi-Gait_straight_flat_SGS-Trot-Ladder --agent.stage.init-mode fork \
-    --agent.stage.init-checkpoint <walk ladder model_N.pt>                         # one stage by hand
+python train.py --task Multi-Gait_straight_flat_SGS --init-checkpoint <walk refine model_N.pt>  # walk refine starts from it
+python train.py --task Multi-Gait_straight_flat_SGS-Trot-Refine --agent.stage.init-mode fork \
+    --agent.stage.init-checkpoint <walk refine model_N.pt>                         # one stage by hand
 python play.py Multi-Gait_straight_flat_SGS-Trot-Refine --checkpoint-file <model.pt>
+python play.py Multi-Gait_straight_flat_SGS-Walk-Refine --checkpoint-file <model.pt> --speed 0.5
 ```
 
+`play.py --radius R` holds a turn of R m (+ left, − right, 0 straight); refine checkpoints otherwise get a random
+feasible radius per episode. `play.py --joystick` (Refine tasks) steers with a gamepad over the Linux joystick API
+(`tools/joystick.py`, no extra packages): hold L1 to turn left, R1 to turn right; the stick ramps to full lock in 1.5 s and
+returns to 0 in 0.5 s after release. Curvature = stick * min(1/r_min, 0.4 g / v^2), ang_z = v * curvature, so it stays
+within what the curriculum trains. `play.py --speed V` holds the command at V m/s (no resampling). A **ladder** checkpoint plays at a constant speed by
+default: the fastest speed it had mastered when saved, i.e. the lower edge of its SGS frontier bin (the checkpoint
+stores the SGS state). With no bin mastered that is the bottom of the gait's range. `--speed` overrides it. Other
+checkpoints play with the speed resampled over the gait's range every 4–8 s.
+
+`--stage-init JOB=PATH` restarts one job from a checkpoint in continue mode (actor, critic, optimizer; no warmup or
+std floor), e.g. `--stage-init trot-refine=<trot model_N.pt>` after a clock or reward change. Set that job back to
+pending in `pipeline.json` (or delete its entry) before `--resume` if it was marked done.
+
 Unknown options are forwarded to every training stage (`--env.*`, `--agent.*`, `--gpu-ids`, ...).
+
+## Play all four gaits: `scripts/Multiplay.py`
+
+```bash
+cd scripts && python Multiplay.py              # bundled policies in policies/multigait/
+python Multiplay.py --run gaits_v4             # or a pipeline run's policies
+python Multiplay.py --gallop <model_N.pt>      # override one gait
+```
+
+DualSense (Linux joystick API, `centaur_rl/tasks/Multi_Policy/tools/dualsense.py`, buttons and axes looked up
+by kernel code): **R2** hold = speed up (rate ∝ trigger), **L2** = slow down, **Triangle** = next gait up,
+**Circle** = next gait down, **L1 / R1** = turn left / right. One simulation at 100 Hz (the gallop's rate); the
+50 Hz walk / trot / canter policies are queried every second step with the action held, as in training. A gait
+switch swaps the gait command's clock live (the stride phase carries on) and clamps the speed into the new gait's
+range: shift inside the overlaps (walk/trot 1.20–1.30, trot/canter 2.24–2.80, canter/gallop 4.47–6.00 m/s) for
+a smooth change. A fall respawns the robot at rest in the walk. `policies/multigait/manifest.json` lists where
+each bundled checkpoint came from.
 
 ## Stages per gait
 
 | Stage | What it trains | Starts from |
 |---|---|---|
-| `g-ladder` | SGS speed ladder: 80% of episodes at the frontier speed **V_current**, 20% replay of slower mastered bins. The frontier moves up one bin when its success rate reaches 0.8 (at least 50 outcomes). Command fixed per episode. | walk: from scratch. Other gaits: **fork** of the previous gait's ladder checkpoint (`fork_iteration`, default its last one) |
-| `g-refine` | whole speed range, SGS-weighted, command resampled every 4–8 s, up and down. 20% of resets start from the slower gait's top-speed states. | **continue** from `g-ladder` |
+| `g-refine` | whole speed range × turn radius (2 km → R_min, per-speed radius frontier), speed resampled every 4–8 s, up and down, radius kept. 20% of resets start from the slower gait's top-speed states. | walk: from scratch (or `--init-checkpoint`, continue). Other gaits: **fork** of the previous gait's refine checkpoint (`fork_iteration`, default its last one) |
 | `g-up` / `g-down` | record handoff banks: states of `g-refine` at the gait's top or lowest speed | — |
 | `g-handoff` (optional, 500 it) | as refine, with 50% of resets from neighbour banks (slower gait's `up`, faster gait's `down`) | continue from `g-refine` |
 
 **Fork** (new gait):
 - The actor weights and the actor's observation normalizer are loaded; the critic and optimizer start fresh.
-- The actor is frozen for the first 200 iterations, so only the critic trains.
-- Action std is raised to at least 0.6.
+- The actor is frozen for the first 50 iterations (was 200; the trot critic's value loss settles in ~40–50), so only
+  the critic trains. The learning rate is held at the base 1e-3 during the warmup (schedule `fixed`), and the adaptive
+  schedule resumes from 1e-3 at the first unfrozen update. Before this fix the schedule climbed to its 1e-2 cap while
+  the actor was frozen (KL ≈ 0). The first actor update then ran at 10× the base rate and wrecked the gaits_v4 trot
+  fork in one iteration (episode length 148 → 5 steps).
+- Action std is raised to at least 0.4 (was 0.6: in gaits_v4 the extra noise inflated the trot fork's action-rate
+  and slip penalties).
+- Trot, canter and gallop get an **`is_alive`** bonus (+0.75 per second, `rewards/common.py`). The first gaits_v4 trot
+  fork netted about −4.1 per second alive, against a one-off −4 for terminating (`is_terminated` −200 × 0.02 s). So it
+  learned to drop the base within ~0.2 s (all `base_too_low`, std 0.6 → 0.21 by it 350). The walk has no bonus: it
+  never forks. Tried 5, 1 and 0.1, now 0.75. With +1, the second fork learned to **stand**
+  (v_x ≈ −0.05 m/s): standing scored ~+3.1 per second (`track_angular_velocity` 0.97, `is_alive` 1.0, `pose` 0.79,
+  `track_turn_lean` 0.49, `track_yaw_fine` 0.45), while the linear kernel gives no gradient 2 m/s from the command.
+- **Progress gate (every gait):** `track_angular_velocity`, `track_yaw_fine` and `track_turn_lean` are multiplied by
+  `forward_progress` = clamp(v_x / v_cmd, 0, 1) (`gate_by_progress=True`). Standing still earns none of them, and
+  together they grow linearly with the speed reached, which is the gradient out of a standstill.
 - The actor normalizer's sample count is capped at 2M, so its mean and std re-adapt to the new gait. It is never frozen.
 
 **Continue** (same gait): actor, critic and optimizer are all loaded.
 
-Default budgets are in `gaits.StageBudget`: ladder 1000, refine 10000, handoff 500, critic warmup 200.
+Default budgets are in `gaits.StageBudget`: refine 10000 (walk 5000), handoff 500, critic warmup 50.
+
+There is no ladder stage in the pipeline. In run `gaits_v2` the walk ladder stayed at 0% success in its first
+speed bin for all 2000 iterations, and its speed error grew to 0.63 m/s by the end. The trot forked from it never tracked speed (1.2–1.9 m/s error). The
+walk refine learned to walk (0.07 m/s error). The `-Ladder` stage tasks are still registered for training by hand.
 
 Each gait's deployed policy is the final checkpoint of `g-handoff`, or of `g-refine` if
 handoff is disabled. The paths are written to `pipeline.json` → `deployed_policies`.
@@ -45,8 +95,8 @@ handoff is disabled. The paths are written to `pipeline.json` → `deployed_poli
 | Gait | Speed (m/s) | Clock (touchdown FR, FL, RR, RL / duty) | Spawn |
 |---|---|---|---|
 | walk | 0–1.30 (SGS from 0.15) | .476, .976, .226, .726 (lateral sequence, footfalls 0.25 apart) / 0.79 → 0.57 with speed | at rest |
-| trot | 1.20–2.80 | 0, .5, .5, 0 (diagonal pairs) / 0.47 → 0.39 with speed | moving at the command |
-| canter | 2.24–6.00 | 0.60, .32, .33, 0 (right lead: RL, FL → RR, FR) / 0.38 → 0.32 with speed | moving |
+| trot | 1.20–2.80 | 0, .5, .5, 0 (diagonal pairs) / 0.38 → 0.29 with speed | moving at the command |
+| canter | 2.24–6.00 | 0.51, .272, .281, 0 (right lead: RL, FL → RR, FR) / 0.34 → 0.272 with speed | moving |
 | gallop | 4.47–8.00 (top end is a placeholder) | .50, .345, .17, 0 (right lead: RL, RR, FL, FR, one flight) / fore 0.30 → 0.20, hind 0.33 → 0.23 | moving |
 
 Walk/trot, trot/canter and canter/gallop all overlap (`check_gait_chain`). The walk tops out at Froude 0.30
@@ -56,9 +106,9 @@ Stride frequency rises with speed. The walk uses `f(v) = clamp(0.7 + 0.95 v, 0.6
 horses), and its duty factor follows the frequency with a fixed air time per foot:
 `duty = clamp(1 − 0.25 s · f, 0.55, 0.80)` (0.79 at 0.15 m/s, 0.57 at 1.3 m/s, always 2–3 feet down). Set per gait
 by `GaitClock.air_time` and `StrideFrequency.slope/offset`; `gait_duty` is the per-env duty, so the observation
-layout is unchanged. The trot does the same with `f = 2.0 + 0.19 v` (2.0–3.0 Hz) and `duty = clamp(1 − 0.24 s · f,
-0.35, 0.50)` (0.47 at 1.2 m/s, 0.39 at 2.8 m/s). The canter uses `f = 2.04 + 0.25 v` (2.60–3.54 Hz) and
-`duty = clamp(1 − 0.20 s · f, 0.32, 0.38)`. The gallop uses `f = 2.54 + 0.127 v` (3.11–3.56 Hz) and a
+layout is unchanged. The trot does the same with `f = 2.0 + 0.19 v` (2.0–3.0 Hz) and `duty = clamp(1 − 0.28 s · f,
+0.28, 0.50)` (0.38 at 1.2 m/s, 0.29 at 2.8 m/s). The canter uses `f = 2.04 + 0.25 v` (2.60–3.54 Hz) and
+`duty = clamp(1 − 0.22 s · f, 0.272, 0.34)`. The gallop uses `f = 2.54 + 0.127 v` (3.11–3.56 Hz) and a
 per-leg air time (fore 0.225 s, hind 0.217 s), so fore and hind duty differ; `gait_duty` shows their mean.
 
 Fixed for every gait, because changing any of these invalidates every checkpoint:
@@ -78,7 +128,7 @@ now acts every 10 ms, which the critic warmup and std floor have to absorb.
 Actor:
 - base angular velocity
 - projected gravity
-- `gait_command` [v_cmd, f]
+- `gait_command` [v_cmd, f, ω_cmd] (ω_cmd = 0 except on refine turns)
 - `gait_clock`: sin/cos of each leg's phase (8 values)
 - `gait_onehot` (4)
 - `gait_duty` (1)
@@ -111,6 +161,8 @@ The walking task's term set and weights (see [walking.md](walking.md)). It repla
 |---|---|---|---|
 | `track_linear_velocity` | +1.0 | `track_linear_velocity` | std 0.35 (`WALK.tracking_std`; the walking task used 0.5) |
 | `track_angular_velocity` | +1.0 | `track_angular_velocity` | std 0.5, holds w_z = 0 |
+| `track_yaw_fine` | +0.5 | `track_angular_velocity` | std 0.25, `xy_weight` 0 (shared, `rewards/common.py`) |
+| `track_turn_lean` | +0.5 | `track_turn_lean` | exp(−(g_y − sin θ)²/0.07²), θ = atan(v²κ/g); shared, `rewards/common.py` |
 | `foot_gait` | +1.5 | `gait_contact_schedule` | 0.5 · per-foot match + 0.5 · [all four match] |
 | `foot_contact_in_swing` | −0.5 | `feet_contact_in_swing` | |
 | `touchdown_timing` | +3.0 | `touchdown_timing` | at each touchdown exp(−d²/0.08²), d = cycle-fraction distance from the scheduled touchdown; sparse (~0.1 of the weight per step at full marks) |
@@ -136,6 +188,8 @@ front-left touchdown the command measures the spacing FL→FR, RL→RR (both 0.5
 fractions of the stride (the ratios Robilliard et al. report for the horse walk: 0.50 ± 0.01 fore, 0.50 ± 0.02
 hind). A stride's score is its worst deviation (0.5 if a foot did not land in the stride); the episode needs at
 least one stride and a mean score ≤ `WALK.success_timing_tol` (0.05). Logged as `footfall_timing_error`.
+**Currently off:** `env_cfg._sgs` passes `timing_tol=None` for every gait (see [Turns](#turns-refine-only)); the
+metric is still logged.
 
 ### Trot (`rewards/trot.py`)
 
@@ -145,10 +199,12 @@ The trot task's term set and weights (see [trot.md](trot.md)). It replaces `comm
 |---|---|---|---|
 | `track_linear_velocity` | +1.0 | `track_linear_velocity` | kernel width max(0.5, 0.2·v_cmd) m/s (0.5 = `TROT.tracking_std` = the trot task's √0.25; widens above 2.5 m/s), z weight 0.5 (flight needs base bounce) |
 | `track_angular_velocity` | +1.0 | `track_angular_velocity` | std √0.5, holds w_z = 0 |
+| `track_yaw_fine` | +0.5 | `track_angular_velocity` | std 0.25, `xy_weight` 0 (shared, `rewards/common.py`) |
+| `track_turn_lean` | +0.5 | `track_turn_lean` | exp(−(g_y − sin θ)²/0.07²), θ = atan(v²κ/g); shared, `rewards/common.py` |
 | `foot_gait` | +0.5 | `gait_contact_schedule` | exact_weight 0: fraction of feet matching the clock (the trot task's `feet_gait`) |
 | `touchdown_timing` | +1.5 | `touchdown_timing` | **new.** std 0.045 cycle: diagonal partners must land together (horse ratios 0.50 ± 0.03); sparse, 4 landings per cycle |
 | `excess_contact` | −0.3 | `feet_excess_contact` | **new.** feet on the ground beyond 2 (a trot has 0–2) |
-| `foot_suspension` | +0.3 | `feet_suspension` | 1 while the clock schedules a flight and no foot is down; that is 1 − 2·duty of the cycle, 0.06 at 1.2 m/s to 0.21 at 2.8 m/s |
+| `foot_suspension` | **+2.0** (trot task 0.3) | `feet_suspension` | 1 while the clock schedules a flight and no foot is down; that is 1 − 2·duty of the cycle, 0.25 at 1.2 m/s to 0.42 at 2.8 m/s. At 0.3 it was worth ≤ 0.06 per second and gaits_v4 skipped flight below ~2 m/s |
 | `body_orientation_l2` | −1.0 | `body_orientation_roll_pitch` | upright target (no turns) |
 | `body_ang_vel` | −0.05 | `body_angular_velocity_roll_pitch` | body-frame roll/pitch rate (trot task: world-frame x/y; equal near upright) |
 | `angular_momentum` | −0.025 | `angular_momentum_penalty` | |
@@ -159,13 +215,14 @@ The trot task's term set and weights (see [trot.md](trot.md)). It replaces `comm
 | `stand_still` | −1.0 | `stand_still` | inactive: the trot is never commanded to stand |
 | `torque_l2` | −1e-5 | `torque_l2` | not in the trot task; kept from the walk (torque limit is 400 Nm here) |
 | `is_terminated`, `joint_acc_l2`, `joint_pos_limits` | −200, −2.5e-7, −10 | mjlab | |
+| `is_alive` | +0.75 | mjlab | per second alive; forked gaits only (see Fork) |
 | `action_rate_l2` | −0.2 | mjlab | 4× the trot task's −0.05: action scale 0.5 instead of 0.25 |
 
 Differences from the trot task's own clock (fixed 0.6 s period, flight fraction 0.02→0.14 with speed): here
 `foot_gait`, `foot_suspension`, `touchdown_timing` and `excess_contact` read `GaitCommand.stance_target`, so the
-flight phases follow `TROT.clock`. Horse-based, it holds each foot's air time at 0.24 s and lets the duty factor
-follow the stride frequency, so flight (1 − 2·duty)/(2f) grows with speed like the trot task's: 16 ms at
-1.2 m/s, 30 ms at 2.0, 43 ms at 2.8.
+flight phases follow `TROT.clock`. It holds each foot's air time at 0.28 s and lets the duty factor
+follow the stride frequency, so flight (1 − 2·duty)/(2f) grows with speed: 56 ms at 1.2 m/s, 67 ms at 1.8,
+83 ms at 2.8.
 
 #### Horse-data additions
 
@@ -183,10 +240,11 @@ This L is an estimate, not a value from the paper. It matches the walk's 0.25 s 
 horse swing scaled the same way. On that basis the robot's 1.2–2.8 m/s (Fr 0.25–1.38) corresponds to horse
 trots at ~1.7–4.0 m/s. Times scale by √(0.58/1.2) ≈ 0.69 and frequencies by ≈ 1.44.
 
-1. **Duty falls with speed at a fixed air time** (`gaits.TROT`): `GaitClock(air_time=0.24, duty_min=0.35,
-   duty_max=0.50)` (0.24 s = horse swing ~0.345 s × 0.69) and `StrideFrequency(slope=0.19, offset=2.0,
-   f_min=2.0, f_max=3.0)`, i.e. 2.23 → 2.53 Hz instead of 1.4 → 3.0. Duty 0.47 → 0.39, flight 16 → 43 ms. The
-   trot is almost flight-free at 1.2 m/s, which eases the handoff from the walk.
+1. **Duty falls with speed at a fixed air time** (`gaits.TROT`): `GaitClock(air_time=0.28, duty_min=0.28,
+   duty_max=0.50)` and `StrideFrequency(slope=0.19, offset=2.0, f_min=2.0, f_max=3.0)`, i.e. 2.23 → 2.53 Hz
+   instead of 1.4 → 3.0. Duty 0.38 → 0.29, flight 56 → 83 ms per phase. The first value was the horse-scaled
+   0.24 s (swing ~0.345 s × 0.69, duty 0.47 → 0.39, flight 16 → 43 ms): the gaits_v4 trot tracked it (88% of the
+   scheduled flight airborne at 2.8 m/s) but it read as a grounded trot, so the air time was raised.
 2. **Diagonal synchrony:** `touchdown_timing` with std 0.045 and weight 1.5 (the per-foot `foot_gait` cannot tell
    a late diagonal partner from a wrong foot), and `TROT.success_timing_tol = 0.06` (2 s.d. of the horse
    ratios) so SGS only counts strides that are real trots. The footfall-spacing metric is the one the walk
@@ -214,11 +272,14 @@ Horse references: Robilliard, Pfau & Wilson 2007 (`187.pdf`, footfall timing) an
 |---|---|---|---|
 | `track_linear_velocity` | +1.0 | `track_linear_velocity` | std 0.8 (`CANTER.tracking_std`), width max(0.8, 0.2·v_cmd), z weight **0.3** (trot 0.5) |
 | `track_angular_velocity` | +1.0 | `track_angular_velocity` | same |
-| `foot_gait` | +0.5 | `gait_contact_schedule` | same |
-| `touchdown_timing` | +1.5 | `touchdown_timing` | std **0.05** (trot 0.045): horse canter ratios are 0.27 ± 0.03 fore, ± 0.05 hind |
+| `track_yaw_fine` | +0.5 | `track_angular_velocity` | std 0.25, `xy_weight` 0 (shared, `rewards/common.py`) |
+| `track_turn_lean` | +0.5 | `track_turn_lean` | exp(−(g_y − sin θ)²/0.07²), θ = atan(v²κ/g); shared, `rewards/common.py` |
+| `foot_gait` | **+1.5** (first 0.5) | `gait_contact_schedule` | **exact_weight 0.5**: half per-foot, half all-four-feet match. At 0.5 per-foot only the gaits_v4 canter drifted to foot match 0.73, all-four 0.24, 47% flight vs 15–22% scheduled |
+| `touchdown_timing` | **+3.0** (first 1.5) | `touchdown_timing` | std **0.05** (trot 0.045): horse canter ratios are 0.27 ± 0.03 fore, ± 0.05 hind |
+| `unscheduled_flight` | −1.0 | `unscheduled_flight` | **new** (the gallop's): all feet up outside the clock's flight window |
 | `diagonal_order` | −1.0 | `diagonal_order` | **new.** 1 on the step RR lands while FL is not down yet |
 | `excess_contact` | −0.3 | `feet_excess_contact` | `max_feet=3` (trot 2): a canter has 0–3 feet down |
-| `foot_suspension` | +0.5 | `feet_suspension` | trot 0.3. One flight per cycle, 0.02–0.08 of it, so a sparser signal |
+| `foot_suspension` | **+2.0** (first 0.5) | `feet_suspension` | as the trot. One flight per cycle, 0.15–0.22 of it with the compressed clock (0.02–0.08 before) |
 | `body_orientation_l2` | −1.0 | `body_orientation_roll_pitch` | roll 1.0, pitch **0.2** (trot 1.0 / 1.0) |
 | `body_ang_vel` | −0.05 | `body_angular_velocity_roll_pitch` | roll 1.0, pitch **0.2** |
 | `angular_momentum` | −0.025 | `angular_momentum_penalty` | same |
@@ -227,6 +288,7 @@ Horse references: Robilliard, Pfau & Wilson 2007 (`187.pdf`, footfall timing) an
 | `foot_slip` | −0.25 | `feet_slip` | same |
 | `soft_landing` | −1e-3 | `soft_landing` | same |
 | `is_terminated`, `joint_acc_l2`, `joint_pos_limits` | −200, −2.5e-7, −10 | mjlab | same |
+| `is_alive` | +0.75 | mjlab | per second alive; forked gaits only (see Fork) |
 | `action_rate_l2`, `torque_l2` | −0.2, −1e-5 | mjlab | same |
 
 `stand_still` is dropped (the canter is never commanded to stand).
@@ -238,18 +300,20 @@ Horse references: Robilliard, Pfau & Wilson 2007 (`187.pdf`, footfall timing) an
   that (FL and RR are scheduled 0.01 of a cycle apart), so `diagonal_order` checks it on the contact sensor.
   Simultaneous landings are allowed. Logged as `Metrics/diagonal_order_violations`.
 - **Footfall spacing (187, Table 4, right canter).** Fore ratio (RF − LF)/T = 0.27 ± 0.03, hind 0.67 ± 0.05
-  measured as |RH − LH| from LF, i.e. 0.33 as RR − RL. Clock `touchdown = (FR 0.60, FL 0.32, RR 0.33, RL 0)`:
-  FR − FL = 0.28, RR − RL = 0.33. The SGS timing test (`success_timing_tol` 0.08, ~2 s.d.) uses the existing
+  measured as |RH − LH| from LF, i.e. 0.33 as RR − RL. The horse-exact clock `(FR 0.60, FL 0.32, RR 0.33, RL 0)`
+  is **compressed ×0.85** to `(FR 0.51, FL 0.272, RR 0.281, RL 0)`: FR − FL = 0.24, RR − RL = 0.28 (~1 s.d. low),
+  same order, so the stance sequence ends earlier and leaves room for a visible flight (see Flight). The SGS timing test (`success_timing_tol` 0.08, ~2 s.d.) uses the existing
   FL-to-FL stride metric unchanged; its expected spacings come from this clock (0.28, 0.33, 0.32, 0.27).
 - **Fixed air time (187, Table 3).** Horse swing stays at ~285–320 ms from 5 to 9 m/s while stance shrinks
   (184 → 122 ms), so as for the trot `GaitClock(air_time=0.20)` (0.30 s × 0.69) and the duty follows the stride
   frequency. Horse stride frequency is roughly 2.0 → 2.5 Hz; scaled ×1.44 and fitted: `f = 2.04 + 0.25 v`.
   2.74 Hz at 2.8 m/s against the trot's 2.53 Hz at the top of its range.
-- **Flight.** One flight after FR lifts, 0.40 − duty of the cycle: 8 ms at 2.24 m/s (duty capped at 0.38) up to
-  23 ms at 6 m/s (duty 0.32). Below 20 ms the flight is under one control step, so `foot_suspension` is
-  mostly a bonus at the upper half of the speed range. **`duty_min = 0.32` matters:** the FL touchdown is at
-  0.32, so a duty below it lifts RL before the diagonal pair lands and the stride gets a second flight phase,
-  which is not a canter (checked numerically: with 0.28 the 6 m/s clock has two flight segments). At most
+- **Flight.** One flight after FR lifts, 0.49 − duty of the cycle (`air_time` 0.22 s, duty 0.34 → 0.272): 15% /
+  58 ms at 2.24 m/s up to 22% / 62 ms at 6 m/s. The horse-exact clock gave 0.40 − duty with duty 0.38 → 0.32:
+  only 8 → 23 ms, the short flight that made the first gaits_v4 trot look grounded. **`duty_min` = the FL
+  touchdown (0.272) matters:** a duty below it lifts RL before the diagonal pair lands and the stride gets a
+  second flight phase, which is not a canter (checked numerically: one flight phase, 0–3 feet down, at every
+  speed). At most
   3 feet are ever down at every speed.
 - **Pitch is part of the gait (St. George 2023).** The trunk pitches nose-down through the trailing-fore +
   leading-hind diagonal support (~50% of the stride) and back up through lead-fore support and flight, so pitch
@@ -270,6 +334,14 @@ Open points:
 
 ### Gallop (`rewards/gallop.py`)
 
+**Trained from scratch** (`StageBudget(fork_from_previous=False)`), not forked: it runs at 100 Hz, and the 50 Hz
+canter actor forked into it fell within 3 s at every speed. It still runs after the canter and still starts 20% of
+episodes from the `canter-up` bank. A random std-1.0 policy netted about −15 per second alive (action rate −9.2,
+foot slip −3.6, joint acc −3.5) against −4 for terminating, so it starts at **action std 0.4**
+(`scratch_init_std`) and **`mdp.PenaltyRamp`** scales `action_rate_l2`, `joint_acc_l2`, `foot_slip` and
+`torque_l2` from 10% to full weight over the first 500 iterations (`penalty_ramp_iterations`; logged as
+`Curriculum/penalty_ramp/scale`). Measured at the start: about +2.2 per second alive.
+
 Starts from the canter's term set and changes what the gallop does differently. It replaces `common_rewards`.
 Horse references: Witte, Hirst & Wilson 2006 (`4389.pdf`, stride timing of 9 Thoroughbreds at 9–17 m/s, 5642
 strides) and Self Davies, Spence & Wilson 2019 (`12348_Ground-reaction-forces-...pdf`, force plates under 7
@@ -279,7 +351,9 @@ galloping Thoroughbreds at 9–14 m/s). The clock is `gaits.GALLOP`. Runs at **1
 |---|---|---|---|
 | `track_linear_velocity` | +1.0 | `track_linear_velocity` | std 1.0, width max(1.0, 0.2·v_cmd), z weight **0.2** (canter 0.3) |
 | `track_angular_velocity` | +1.0 | `track_angular_velocity` | same |
-| `foot_gait` | +0.5 | `gait_contact_schedule` | same (per-leg duty now) |
+| `track_yaw_fine` | +0.5 | `track_angular_velocity` | std 0.25, `xy_weight` 0 (shared, `rewards/common.py`) |
+| `track_turn_lean` | +0.5 | `track_turn_lean` | exp(−(g_y − sin θ)²/0.07²), θ = atan(v²κ/g); shared, `rewards/common.py` |
+| `foot_gait` | **+1.5** (first 0.5) | `gait_contact_schedule` | exact_weight 0.5 as the canter (per-leg duty now) |
 | `touchdown_timing` | +4.0 (2.0 × 2) | `touchdown_timing` | std **0.05** cycle ≈ 1.5 steps at 100 Hz |
 | `footfall_sequence` | +1.0 (0.5 × 2) | `footfall_sequence` | **new.** 1 at the FR touchdown when RL < RR < FL < FR landed in that strict order within the stride. Replaces `diagonal_order` |
 | `excess_contact` | −0.3 | `feet_excess_contact` | `max_feet=2` (canter 3) |
@@ -296,6 +370,7 @@ galloping Thoroughbreds at 9–14 m/s). The clock is `gaits.GALLOP`. Runs at **1
 | `foot_clearance` | −1.5 | `feet_clearance` | same 0.16 m (neither paper has swing height) |
 | `foot_slip` | −0.25 | `feet_slip` | same |
 | `is_terminated` | −400 (−200 × 2) | mjlab | same per termination |
+| `is_alive` | +0.75 | mjlab | per second alive; forked gaits only (see Fork) |
 | `joint_acc_l2`, `joint_pos_limits`, `torque_l2` | −2.5e-7, −10, −1e-5 | mjlab | same |
 | `action_rate_l2` | −0.4 (−0.1 × 4) | mjlab | = −0.1 at 50 Hz, half the canter's: stances need fast joint motion |
 
@@ -355,6 +430,55 @@ Open points:
 - The 50 Hz canter → 100 Hz gallop fork is untested. If the forked actor collapses, try more critic warmup
   iterations or a higher std floor for the gallop fork.
 
+## Turns (refine only)
+
+The refine stage of every gait trains turns. Handoff stays straight, and the handoff banks are
+recorded straight.
+
+- **Non-holonomic arcs.** `ang_z = sign · lin_x_cmd / r`. The robot never turns on the spot. r and the direction
+  (±, 50/50) are fixed for the episode. ang_z is recomputed from the commanded speed whenever that changes
+  (mid-episode resamples). Moving spawns start on the arc (yaw rate = ang_z).
+- **Radius is an SGS difficulty axis.** 9 radius bins, log-spaced from 2000 m (straight in practice) down to
+  `GaitSpec.turn_radius_min`. Configs are speed bin × radius bin. Each speed bin has its own **radius frontier**,
+  which starts at 2000 m and moves one bin tighter when that (speed, radius) config reaches ≥ 0.8 success over
+  ≥ 50 outcomes. 50% of episodes are drawn at a frontier config (uniform speed bin); the
+  rest are SGS Beta-kernel over every unlocked config (radius at or wider than the frontier). A mid-episode
+  speed resample stays among the speed bins that have the episode's radius unlocked.
+- **Feasibility.** A config is used only if v_hi² / r ≤ `turn_max_lat_accel` = 0.4 g. Foot friction is
+  randomised at 0.6–1.2, so this stays under the grip limit. Tightest radius reached per gait:
+
+  | Gait | R_min | Tightest feasible radius by speed | Max yaw rate |
+  |---|---|---|---|
+  | walk | 1.0 m | 1 m at every speed (90/90 configs) | 1.3 rad/s |
+  | trot | 1.5 m | 1.5 m below ~2.34 m/s, 3.7 m above (122/126) | 1.6 rad/s |
+  | canter | 2.5 m | 2.5 m → 5.8 m (from ~3.0 m/s) → 13.3 m (from ~4.75 m/s) (118/135) | 1.2 rad/s |
+  | gallop | 4.0 m | 8.7 m below ~5.7 m/s, 18.9 m above (103/126 configs) | 0.66 rad/s |
+
+  Radii (log steps of ~2.6×), walk: 2000, 773, 299, 116, 45, 17, 6.7, 2.6, 1.0 m. The first four or five bins are
+  straight in practice (yaw rate ≤ 0.03 rad/s at 1.3 m/s), so they pass quickly. The bins are coarse, so the
+  tightest feasible radius jumps. 4 m is never feasible for the gallop.
+- **Success test.** Speed and termination as before, plus the yaw test on the signed yaw-rate error:
+  `|mean(ω − ω_cmd)| ≤ max(0.2 rad/s, 0.2 · mean|ω_cmd|)`. The footfall-timing test is **off** for every gait.
+  In `gaits_v2` the walk refine's `footfall_timing_error` stayed at about 0.26, against a 0.05 tolerance. So
+  every episode failed, the radius frontier never left the widest radius, and the policy never saw a turn
+  (SGS state of `walk-refine/model_4999.pt`: 0% success in all 90 configs, frontier 0 in every speed bin).
+- **Rewards (all gaits, shared functions).** `body_orientation_roll_pitch` takes `command_name` and measures roll
+  from the turn's equilibrium lean `θ = atan(v² κ / g)` (the walking task's term; upright when straight).
+  `angular_momentum_penalty` takes `command_name` and drops L_z on turning envs: a commanded yaw rate needs yaw
+  angular momentum, and `track_angular_velocity` already scores yaw. `track_angular_velocity` tracks
+  `cmd[:, 2]`. **`track_yaw_fine`** (+0.5, every gait, `rewards/common.py`) is a second, sharper yaw term:
+  `track_angular_velocity` with std 0.25 rad/s and no roll/pitch part (`xy_weight` 0). The main term's kernel
+  barely separates turning from not turning: ignoring a 0.2 rad/s command still scores 0.85 (walk) or 0.92
+  (others) of it, against 0.53 for this term. **`track_turn_lean`** (+0.5, every gait) rewards the lean itself:
+  `exp(−(g_y − sin θ)² / 0.07²)` on `base_link`, with the same target θ as `body_orientation_roll_pitch`. That L2
+  term is flat near its minimum: staying upright through an 8.4° turn (walk, 1.2 m/s on 1 m) costs only 0.021
+  per step, and the gaits_v4 walk did not lean at all (< 2° everywhere). This kernel scores upright 0.01 there.
+  Targets: 2.9° (0.7 m/s, 1 m), 8.4° (1.2 m/s, 1 m), 12° (trot 2.8 m/s, 3.7 m), 15–19° (canter / gallop at
+  the 0.4 g cap). Nothing gait-specific was needed. Canter and gallop are right-lead only, so their left turns run
+  on the counter-lead.
+- **Observation layout change.** `gait_command` gained ω_cmd: actor 57 → 58, critic 88 → 89. Checkpoints from
+  before this change (e.g. run `gaits_v1`) no longer load.
+
 ## Metrics (logged, never rewarded)
 
 - `gait_foot_match`, `gait_exact_match`
@@ -362,7 +486,8 @@ Open points:
 - `forward_speed_error`
 - `footfall_timing_error` (walk: mean worst footfall-spacing deviation per stride)
 - `peak_torque`, `mechanical_power`
-- SGS: `v_current`, `frontier_bin`, `frontier_success`, `episode_success`
+- SGS: `v_current`, `frontier_bin`, `frontier_success`, `episode_success`; refine also `sampled_radius` (median),
+  `sampled_yaw_rate`, `radius_frontier_mean`, `tightest_radius_unlocked`
 
 ## Run layout
 

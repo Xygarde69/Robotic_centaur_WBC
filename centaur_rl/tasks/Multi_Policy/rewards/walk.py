@@ -3,9 +3,11 @@
 Copied from the walking task (tasks/walking: velocity_env_cfg.py rewards, overridden in
 config/centaur/env_cfgs.py), same terms and weights. What changed in the port:
 
-  - command "gait" (lin_x, 0, 0) instead of "twist": no turning, so the roll target of
-    body_orientation is upright (no turn lean) and track_angular_velocity just holds
-    w_z = 0;
+  - command "gait" (lin_x, 0, ang_z) instead of "twist": straight in the ladder; in
+    refine non-holonomic arcs ang_z = lin_x_cmd / r (radius an SGS axis). As in the
+    walking task, body_orientation's roll target is the turn's equilibrium lean
+    (upright when straight) and track_angular_velocity tracks ang_z;
+    angular_momentum ignores the yaw component on turns;
   - the gait clock is GaitCommand's (stride frequency from the speed, not a commanded
     cycle time). The walking task's startup hold (each foot down until its first
     lift-off when starting from rest) lives in GaitCommand.stance_target;
@@ -26,7 +28,7 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from centaur_rl.tasks.Multi_Policy import mdp
 from centaur_rl.tasks.Multi_Policy.gaits import WALK, GaitSpec
 
-from .common import COMMAND, CONTACT_SENSOR, FOOT_SITES
+from .common import COMMAND, CONTACT_SENSOR, FOOT_SITES, track_turn_lean, track_yaw_fine
 
 # Walking task values (except where noted in rewards()).
 TRACK_ANG_STD = 0.5
@@ -56,8 +58,11 @@ def rewards(spec: GaitSpec = WALK) -> dict[str, RewardTermCfg]:
       func=mdp.track_linear_velocity, weight=1.0, params={**cmd, "std": spec.tracking_std}
     ),
     "track_angular_velocity": RewardTermCfg(
-      func=mdp.track_angular_velocity, weight=1.0, params={**cmd, "std": TRACK_ANG_STD}
+      func=mdp.track_angular_velocity, weight=1.0,
+      params={**cmd, "std": TRACK_ANG_STD, "gate_by_progress": True},
     ),
+    "track_yaw_fine": track_yaw_fine(),
+    "track_turn_lean": track_turn_lean(),
     # Gait clock: 0.5 * per-foot match + 0.5 * [all four match]. The all-match half is
     # what separates a walk from a best-aligned trot (75% per-foot, 45% all-four).
     "foot_gait": RewardTermCfg(
@@ -75,7 +80,7 @@ def rewards(spec: GaitSpec = WALK) -> dict[str, RewardTermCfg]:
     "body_orientation_l2": RewardTermCfg(
       func=mdp.body_orientation_roll_pitch,
       weight=-1.0,
-      params={"roll_weight": 1.0, "pitch_weight": 1.0, "asset_cfg": base()},
+      params={"roll_weight": 1.0, "pitch_weight": 1.0, **cmd, "asset_cfg": base()},
     ),
     "body_ang_vel": RewardTermCfg(
       func=mdp.body_angular_velocity_roll_pitch,
@@ -83,7 +88,9 @@ def rewards(spec: GaitSpec = WALK) -> dict[str, RewardTermCfg]:
       params={"roll_weight": 1.0, "pitch_weight": 1.0, "asset_cfg": base()},
     ),
     "angular_momentum": RewardTermCfg(
-      func=mdp.angular_momentum_penalty, weight=-0.025, params={"sensor_name": "robot/root_angmom"}
+      func=mdp.angular_momentum_penalty,
+      weight=-0.025,
+      params={"sensor_name": "robot/root_angmom", **cmd},
     ),
     "pose": RewardTermCfg(
       func=mdp.variable_posture,

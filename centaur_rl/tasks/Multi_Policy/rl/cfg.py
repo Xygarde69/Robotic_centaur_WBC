@@ -49,15 +49,16 @@ NUM_STEPS_PER_ENV = 24
 
 
 def multigait_ppo_cfg(
-  experiment_name: str, max_iterations: int, control_dt: float = REFERENCE_DT
+  experiment_name: str, max_iterations: int, control_dt: float = REFERENCE_DT, init_std: float = 1.0
 ) -> MultiGaitRunnerCfg:
+  """init_std only matters from scratch (fork / continue load the std with the actor)."""
   k = control_dt / REFERENCE_DT  # 0.5 at 100 Hz
   return MultiGaitRunnerCfg(
     actor=RslRlModelCfg(
       hidden_dims=(512, 256, 128),
       activation="elu",
       obs_normalization=True,
-      distribution_cfg={"class_name": "GaussianDistribution", "init_std": 1.0, "std_type": "scalar"},
+      distribution_cfg={"class_name": "GaussianDistribution", "init_std": init_std, "std_type": "scalar"},
     ),
     critic=RslRlModelCfg(hidden_dims=(512, 256, 128), activation="elu", obs_normalization=True),
     algorithm=RslRlPpoAlgorithmCfg(
